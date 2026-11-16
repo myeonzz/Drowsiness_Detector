@@ -28,7 +28,7 @@ mouth model is a second check. See "Yawn detection" below.
 | `demo.py` | Real-time demo (webcam or video file) |
 | `scenarios.py` | Runs the test videos in `./scenarios`, writes `results/scenarios.csv` |
 | `test_alerts.py` | Checks the alert rules with made-up signals |
-| `yawn_test.py` | Guided 2-minute webcam test: talking, neutral, 3 yawns; reports false and missed yawns |
+| `yawn_test.py` | Guided 2.5-minute webcam test. Eye check: open, droopy, closed. Yawn check: talking, neutral, 3 yawns |
 
 ## Setup (Windows, PowerShell)
 
@@ -66,8 +66,11 @@ execution policy).
 .\.venv\Scripts\python.exe scenarios.py
 .\.venv\Scripts\python.exe scenarios.py --show
 
-# 6. Guided yawn test on the webcam (about 2 minutes) -> .\results\yawn_test.csv
+# 6. Guided eye and yawn test on the webcam (about 2.5 minutes)
+#    -> .\results\eye_test.csv and yawn_test.csv
 .\.venv\Scripts\python.exe yawn_test.py
+.\.venv\Scripts\python.exe yawn_test.py --part eyes
+.\.venv\Scripts\python.exe yawn_test.py --part yawn
 ```
 
 To retrain from scratch after changing crop settings, delete the `cache`
@@ -79,15 +82,15 @@ folder first.
 |---|---|
 | `W` | 160-degree mode on/off ("160° MODE" is shown when on) |
 | `M` | Mute on/off ("MUTED" is shown when on) |
-| `C` | Recalibrate the yawn threshold (5 s, mouth closed) |
+| `C` | Recalibrate (5 s, eyes open and mouth closed) |
 | `Q` or `Esc` | Quit |
 
 `--wide` and `--mute` start the demo with those modes already on.
 
 ## Demo window
 
-- **Camera view (left):** only the tracked boxes, each with a name tag: `face` (magenta), each eye as `open 0.98` (green) or `closed 0.93` (red), and the mouth as `mouth 0.02` (green) or `yawn 0.71` (red). The number is the model confidence for eyes and the MAR for the mouth. Calibration and test prompts also appear here, and the border flashes red during the alarm.
-- **Details panel (right):** the alert level card with its message, then Driver (eyes, mouth, MAR against its threshold, PERCLOS), Offenses (count, kind of each, last one, time to the next drop), System (fps, 160-degree mode, sound) and the keys.
+- **Camera view (left):** only the tracked boxes, each with a name tag: `face` (magenta), each eye as `open 12%` (green) or `closed 86%` (red), and the mouth as `mouth 0.02` (green) or `yawn 0.71` (red). The number is that eye's closure % for eyes and the MAR for the mouth. Calibration and test prompts also appear here, and the border flashes red during the alarm.
+- **Details panel (right):** the alert level card with its message, then Driver (eyes, live closure % with EAR, eye CNN score, mouth, MAR against its threshold, PERCLOS P80), Offenses (count, kind of each, last one, time to the next drop), System (fps, 160-degree mode, sound) and the keys.
 
 ## Camera settings
 
@@ -105,20 +108,44 @@ folder first.
 A 16:9 camera image is centre-cropped to 4:3 (not squashed) before the resize.
 Video files go through the same resize, so scenario results match the live demo.
 
+## Eye closure detection
+
+Two signals decide whether a frame counts as "eyes closed":
+
+| Signal | How it works |
+|---|---|
+| Eye CNN | Each eye crop is classified; both eyes must be Closed with confidence >= 0.7 |
+| EAR | Eye Aspect Ratio per eye = vertical lid distances / horizontal eye width, from the eye landmarks; both eyes are averaged |
+| Calibration | During the 5 s startup calibration (eyes open, mouth closed) the driver's median EAR is stored as `EAR_open`. If it is below 0.12 (eyes closed or hidden), a default of 0.30 is used |
+| Closure % | `1 - EAR / EAR_open`. 0% is the driver's normal open eye, whatever its shape. A frame is "80% closed" when closure >= 0.80 |
+| Manual EAR | `EAR_CLOSED_MANUAL` in `config.py` (for example `0.08`) replaces the 80% rule with a fixed EAR value |
+| Rule | `EYE_CLOSED_RULE` picks how the two combine: `"cnn"`, `"ear"`, `"either"` (default: CNN or EAR) or `"both"` (CNN and EAR) |
+| PERCLOS (P80) | Share of frames in the last 60 s with closure >= 0.80. Shown on screen; it does not trigger alerts |
+
+The offense rules are unchanged: closed frames for 2 s is an offense, 3 s is
+the Level 3 override. Every frame's EAR, closure %, CNN score and decisions
+are logged to `events\frames_<start time>.csv`.
+
+Which rule suits a driver is what the eye check in `yawn_test.py` measures: it
+reports, for 20 s eyes open, 10 s droopy and 5 s closed, the share of frames
+each of the four rules calls closed. With `"either"`, a CNN that wrongly says
+Closed still counts as closed; if the eye check shows that for your eyes,
+switch to `"ear"` or `"both"`.
+
 ## Yawn detection
 
 | Step | What happens |
 |---|---|
 | MAR | Mouth Aspect Ratio = vertical inner-lip opening / mouth width, from the lip landmarks. About 0.01 with the mouth closed; the dataset's yawn photos have a median of 0.71 |
-| Calibration | For the first 5 s the demo shows "CALIBRATING" (keep the mouth closed, normal face) and takes the median MAR as the driver's baseline. Press `C` to redo it |
+| Calibration | For the first 5 s the demo shows "CALIBRATING" (eyes open, mouth closed) and takes the median MAR as the driver's baseline. Press `C` to redo it |
 | Threshold | baseline + `MAR_YAWN_OFFSET` (0.35), never below 0.30. If the mouth was open during calibration (baseline above 0.20) a default baseline of 0.02 is used instead |
-| Manual threshold | Set `MAR_THRESHOLD_MANUAL` in `config.py` (for example `0.40`) to skip calibration |
+| Manual threshold | Set `MAR_THRESHOLD_MANUAL` in `config.py` (for example `0.40`) to use a fixed threshold |
 | Mouth CNN | When MAR is above the threshold, the mouth-crop CNN must also say "yawn" (`YAWN_USE_CNN = True`). Set it to `False` to use MAR alone |
 | Yawn offense | Yawn frames continuously for 4 s (one other frame in between is allowed) |
 
 The details panel shows the live value as `MAR 0.12 (yawn >= 0.36)`,
 plus the CNN score while the mouth is open. No yawns are counted during
-calibration. Every frame's MAR is logged to `events\mar_<start time>.csv`.
+calibration. Every frame's MAR is logged to `events\frames_<start time>.csv`.
 
 On the dataset's mouth test photos (`results\yawn_methods.csv`), MAR alone and
 "MAR and CNN agree" give the same result: no false yawns and 7 of 107 yawn
@@ -139,18 +166,21 @@ If it is, turn it off.
 | `results\<model>_training_curves.png` | Training / validation accuracy and loss |
 | `results\mouth_dropped.json` | yawn / no_yawn images dropped because no face was found |
 | `results\yawn_methods.csv` | Yawn decision per test photo: MAR alone, mouth CNN alone, both agreeing |
-| `results\yawn_test.csv`, `yawn_test_mar.csv`, `yawn_test_mar.png` | Guided yawn test: false / missed yawns per phase, MAR per frame, MAR plot |
+| `results\eye_test.csv`, `eye_test_closure.png` | Guided eye check: % of frames each rule calls closed in the open, droopy and closed parts; closure plot |
+| `results\yawn_test.csv`, `yawn_test_mar.png` | Guided yawn check: false / missed yawns per phase; MAR plot |
+| `results\guided_test_frames.csv` | Every frame's signals from the guided test |
 | `results\scenarios.csv` | Expected vs highest level per scenario video |
 | `events\*.avi` + `*.json` | 10 s clip (5 s before + 5 s after) and log for each event that results in Level 2 or 3 |
 | `events\alerts_<start time>.json` | One log per demo session listing every offense and override: time, level, trigger, reason and offense count |
-| `events\mar_<start time>.csv` | One log per demo session with every frame's MAR, threshold, CNN score and yawn decision |
+| `events\frames_<start time>.csv` | One log per demo session with every frame's EAR, closure %, eye CNN score, PERCLOS, MAR, mouth CNN score and the decisions |
 
 ## Alert levels (offense count)
 
 An **offense** is one of:
 
-- eyes closed continuously for 2 s or more (P(Closed) >= 0.7; one open frame
-  does not reset the closure), or
+- eyes closed continuously for 2 s or more (a frame is closed per
+  `EYE_CLOSED_RULE`, see "Eye closure detection"; one open frame does not
+  reset the closure), or
 - a yawn lasting 4 s or more.
 
 Each event is one offense; a long event still counts once. Offenses are
@@ -176,8 +206,8 @@ Rules implemented in `alerts.py`:
   counted. An alarm that starts while the eyes are hidden stops after 5 s,
   because there are no eyes to wait for.
 - The screen shows the offense count and a window timer (time until the
-  oldest offense leaves, which is when the level next drops). PERCLOS (60 s)
-  is still shown for information; it no longer triggers anything.
+  oldest offense leaves, which is when the level next drops). PERCLOS (P80,
+  60 s) is shown for information; it does not trigger anything.
 - Every offense and override is written to `events\alerts_<start time>.json`
   with time, level, trigger, reason and offense count. Events that result in
   Level 2 or 3 also save a 10 s clip.

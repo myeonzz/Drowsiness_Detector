@@ -91,7 +91,7 @@ EYE_CLOSED_RULE = "either"
 EAR_CLOSURE_MIN = 0.80             # "80 % closed"; also the PERCLOS (P80) criterion
 EAR_CLOSED_MANUAL = None           # e.g. 0.08: closed when EAR <= this, instead of the 80 % rule
 EAR_OPEN_DEFAULT = 0.30            # used when calibration is rejected
-EAR_OPEN_MIN = 0.15                # calibration is rejected if the eyes were closed / hidden
+EAR_OPEN_MIN = 0.12                # calibration is rejected if the eyes were closed / hidden
 
 # Yawn detection. Primary signal: Mouth Aspect Ratio from the lip landmarks
 # (MAR = inner-lip opening / mouth width). A yawn frame = MAR at or above the
