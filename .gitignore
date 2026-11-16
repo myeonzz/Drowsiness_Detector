@@ -1,0 +1,16 @@
+# virtual environment and Python caches
+.venv/
+__pycache__/
+*.pyc
+
+# dataset (175 MB of Kaggle photos - download separately, see README)
+train/
+
+# rebuilt by train.py
+cache/
+
+# event clips and scenario videos contain people's faces
+events/*
+scenarios/*
+!events/.gitkeep
+!scenarios/.gitkeep
