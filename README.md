@@ -53,10 +53,10 @@ execution policy).
 # 3. Check the alert rules (no camera needed)
 .\.venv\Scripts\python.exe test_alerts.py
 
-# 4. Live demo with the webcam (Q or Esc to quit)
+# 4. Live demo with the webcam
 .\.venv\Scripts\python.exe demo.py
 .\.venv\Scripts\python.exe demo.py --source scenarios\yawning.mp4
-.\.venv\Scripts\python.exe demo.py --mute --no-record
+.\.venv\Scripts\python.exe demo.py --mute --wide --no-record
 
 # 5. Scenario tests -> .\results\scenarios.csv
 .\.venv\Scripts\python.exe scenarios.py
@@ -65,6 +65,32 @@ execution policy).
 
 To retrain from scratch after changing crop settings, delete the `cache`
 folder first.
+
+## Demo keys
+
+| Key | Action |
+|---|---|
+| `W` | 160-degree mode on/off ("160° MODE" is shown when on) |
+| `M` | Mute on/off ("MUTED" is shown when on) |
+| `Q` or `Esc` | Quit |
+
+`--wide` and `--mute` start the demo with those modes already on.
+
+## Camera settings
+
+| Setting | Value |
+|---|---|
+| Webcam capture | Native resolution: the largest of 1920x1080 / 1280x720 the camera accepts, else its default |
+| Processing resolution | `PROCESS_RES = "svga"`: every frame is resized to 800x600 (4:3) before any detection. This is Aizu's processing resolution on the ESP32-S3 |
+| Optional preset | `PROCESS_RES = "720p"`: 1280x720, the device's ceiling |
+| Model input | Eye and face crops are resized to 96x96 grayscale |
+| 160-degree mode | Frame is downscaled to 400x300 and scaled back to 800x600 before detection, to mimic the low pixel density of the 160-degree lens |
+| Frame rate | Processing is capped at 10 fps; the actual rate is shown on screen |
+| Display window | Freely resizable, kept at the frame's aspect ratio (4:3 for SVGA). Window size does not affect detection |
+| Event clips | Saved at 640x480 MJPEG |
+
+A 16:9 camera image is centre-cropped to 4:3 (not squashed) before the resize.
+Video files go through the same resize, so scenario results match the live demo.
 
 ## Outputs
 
@@ -79,15 +105,21 @@ folder first.
 | `results\face_dropped.json` | yawn / no_yawn images dropped because no face was found |
 | `results\scenarios.csv` | Expected vs highest level per scenario video |
 | `events\*.avi` + `*.json` | 10 s clip (5 s before + 5 s after) and log for each Level 2/3 event |
+| `events\alerts_<start time>.json` | One log per demo session listing every alert (Levels 1-3): time, level, trigger and reason |
 
 ## Alert levels
 
-| Level | Trigger | Action |
-|---|---|---|
-| 0 NORMAL (green) | - | none |
-| 1 CAUTION (yellow) | a yawn of 4 s or more, or 3 yawns in 10 min, or PERCLOS >= 15% | one chime, "Signs of fatigue. Consider a break." |
-| 2 WARNING (orange) | eyes closed continuously >= 2 s, or PERCLOS >= 25%, or eyes closed >= 1 s twice within 60 s | 3 beeps every 10 s, "Drowsiness detected. Pull over soon." |
-| 3 CRITICAL (red) | eyes closed continuously >= 3 s | continuous alarm until eyes are open 2 s, "WAKE UP" |
+| Level | Trigger | Sound | Voice / text |
+|---|---|---|---|
+| 0 NORMAL (green) | - | none | none |
+| 1 CAUTION (yellow) | a yawn of 4 s or more, or 3 yawns in 10 min, or PERCLOS >= 15% | one soft two-note chime, once per trigger | "Signs of fatigue. Consider a break." |
+| 2 WARNING (orange) | eyes closed continuously >= 2 s, or PERCLOS >= 25%, or eyes closed >= 1 s twice within 60 s | 3 short sharp beeps, repeated every 10 s while at Level 2 | "Drowsiness detected. Pull over soon." |
+| 3 CRITICAL (red) | eyes closed continuously >= 3 s | continuous loud two-tone alarm; stops only after the eyes are open for 2 s straight | "WAKE UP" (spoken every 3 s during the alarm) |
+
+The tones are generated with numpy and played with `winsound`, so no audio
+files are needed. The text is spoken with `pyttsx3` (Windows voice); if that is
+missing or fails, the text is shown on screen only. `VOICE_ENABLED = False`
+in `config.py` turns the voice off.
 
 Rules implemented in `alerts.py`:
 
@@ -144,3 +176,5 @@ processed on the video's own clock, so results do not depend on laptop speed.
 - The sunglasses check compares eye-region brightness with the face. It
   catches dark lenses; mirrored or lightly tinted lenses can pass as eyes.
 - Sounds use `winsound`, so they only play on Windows.
+- The alarm is played in 0.5 s pieces, so it pulses slightly and can take up
+  to about half a second to stop.

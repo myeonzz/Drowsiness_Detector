@@ -1,13 +1,16 @@
 """Alert logic: PERCLOS, closure / yawn tracking, the 4-level tier system,
-alert sounds and event-triggered clip recording. No camera code here, so the
+alert sounds, the alert log and event-triggered clip recording. No camera code here, so the
 logic can be tested with made-up signals (see test_alerts.py)."""
+import io
 import json
 import threading
 import time
+import wave
 from collections import deque
 from datetime import datetime
 
 import cv2
+import numpy as np
 
 import config as cfg
 
@@ -165,7 +168,7 @@ class AlertEngine:
                 continue
             self.last_event[name] = t
             events.append({"time": round(t, 2), "level": lvl, "trigger": name,
-                           "perclos": round(perclos, 4)})
+                           "reason": trigger_reason(name), "perclos": round(perclos, 4)})
         self.prev_triggers = set(triggers)
 
         # ---- level: escalate at once, de-escalate one step per quiet 60 s ----
@@ -199,21 +202,119 @@ class AlertEngine:
 
 
 # -------------------------------------------------------------------- sound
-class SoundPlayer:
-    """Plays alert sounds on a background thread (Windows winsound)."""
+SAMPLE_RATE = 22050
 
-    def __init__(self, enabled=True):
+
+def _tone(freq, ms, volume, sharp=False, decay=False):
+    """One generated tone as float samples in [-1, 1]."""
+    t = np.arange(int(SAMPLE_RATE * ms / 1000)) / SAMPLE_RATE
+    samples = np.sin(2 * np.pi * freq * t)
+    if sharp:                                    # squarer wave = harsher sound
+        samples = np.clip(samples * 4, -1, 1)
+    env = np.exp(-4 * t / t[-1]) if decay else np.ones_like(t)
+    edge = min(len(t) // 4, int(SAMPLE_RATE * 0.005))   # 5 ms fade, no clicks
+    env[:edge] *= np.linspace(0, 1, edge)
+    env[-edge:] *= np.linspace(1, 0, edge)
+    return samples * env * volume
+
+
+def _silence(ms):
+    return np.zeros(int(SAMPLE_RATE * ms / 1000))
+
+
+def _wav(samples):
+    """Float samples -> in-memory WAV file (16-bit mono)."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes((np.clip(samples, -1, 1) * 32767).astype(np.int16).tobytes())
+    return buf.getvalue()
+
+
+def build_sounds():
+    """The three alert sounds, generated with numpy (no audio files)."""
+    chime = np.concatenate([_tone(f, cfg.CHIME_MS, cfg.CHIME_VOLUME, decay=True)
+                            for f in cfg.CHIME_HZ])
+    beep = np.concatenate([_tone(cfg.BEEP_HZ, cfg.BEEP_MS, cfg.BEEP_VOLUME, sharp=True),
+                           _silence(cfg.BEEP_GAP_MS)])
+    alarm = np.concatenate([_tone(f, cfg.ALARM_MS, cfg.ALARM_VOLUME, sharp=True)
+                            for f in cfg.ALARM_HZ])
+    return {"chime": _wav(chime), "beeps": _wav(np.tile(beep, 3)), "alarm": _wav(alarm)}
+
+
+class Voice:
+    """Speaks alert texts with pyttsx3 on its own thread. If pyttsx3 is not
+    installed or fails, it stays silent and the text is shown on screen only."""
+
+    def __init__(self):
+        self.available = False
+        self.spoken = []                         # texts actually spoken (for testing)
+        self._pending = None
+        self._stop = False
+        self._ready = threading.Event()
+        threading.Thread(target=self._loop, daemon=True).start()
+        self._ready.wait(timeout=10)
+
+    def say(self, text):
+        self._pending = text                     # newest message wins
+
+    def _loop(self):
+        try:
+            import pyttsx3
+            engine = pyttsx3.init()
+            engine.setProperty("rate", cfg.VOICE_RATE)
+            self.available = True
+        except Exception:
+            return
+        finally:
+            self._ready.set()
+        while not self._stop:
+            text, self._pending = self._pending, None
+            if text is None:
+                time.sleep(0.05)
+                continue
+            try:
+                engine.say(text)
+                engine.runAndWait()
+                self.spoken.append(text)
+            except Exception:
+                self.available = False
+                return
+
+    def close(self):
+        self._stop = True
+
+
+class SoundPlayer:
+    """Escalating alert sounds on a background thread.
+    Level 1: one soft chime per trigger. Level 2: 3 sharp beeps every 10 s.
+    Level 3: continuous loud alarm while the engine's alarm flag is on (it
+    clears only after the eyes have been open for 2 s). Each sound comes with
+    the spoken alert text when a voice is available."""
+
+    def __init__(self, enabled=True, muted=False, voice=True):
         try:
             import winsound
             self._ws = winsound
         except ImportError:                      # not on Windows -> silent
             self._ws, enabled = None, False
         self.enabled = enabled
+        self.muted = muted
+        self.voice = Voice() if (enabled and voice and cfg.VOICE_ENABLED) else None
+        self.played = []                         # (wall time, sound name) for testing
         self._level, self._alarm, self._chime = 0, False, False
-        self._last_beeps = None
+        self._last_beeps = self._last_wake = None
         self._stop = False
         if enabled:
-            threading.Thread(target=self._loop, daemon=True).start()
+            self._sounds = build_sounds()
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+
+    @property
+    def voice_available(self):
+        return bool(self.voice and self.voice.available)
 
     def update(self, state):
         self._alarm = state["alarm"]
@@ -221,32 +322,92 @@ class SoundPlayer:
             self._last_beeps = None              # beep right away on entering Level 2
         self._level = state["level"]
         if state["level"] == 1 and any(e["level"] == 1 for e in state["events"]):
-            self._chime = True
+            self._chime = True                   # once per Level-1 trigger
+
+    def _play(self, name):
+        self.played.append((time.monotonic(), name))
+        self._ws.PlaySound(self._sounds[name], self._ws.SND_MEMORY)   # blocks until done
+
+    def _say(self, text):
+        if self.voice_available:
+            self.voice.say(text)
 
     def _loop(self):
         while not self._stop:
-            if self._alarm:                      # Level 3: continuous alarm
-                self._ws.Beep(cfg.ALARM_HZ, cfg.ALARM_MS)
+            now = time.monotonic()
+            if self.muted:
+                self._chime = False
+                self._last_beeps = self._last_wake = None
+                time.sleep(0.03)
+            elif self._alarm:                    # Level 3: continuous alarm
+                if self._last_wake is None or now - self._last_wake >= cfg.WAKE_UP_REPEAT_S:
+                    self._last_wake = now
+                    self._say(cfg.LEVEL_TEXT[3])
+                self._play("alarm")
             elif self._level == 2 and (self._last_beeps is None or
-                                       time.monotonic() - self._last_beeps >= cfg.BEEP_REPEAT_S):
-                self._last_beeps = time.monotonic()
-                for _ in range(3):               # Level 2: 3 short beeps every 10 s
-                    self._ws.Beep(cfg.BEEP_HZ, cfg.BEEP_MS)
-                    time.sleep(0.1)
+                                       now - self._last_beeps >= cfg.BEEP_REPEAT_S):
+                self._last_beeps = now           # Level 2: 3 beeps every 10 s
+                self._play("beeps")
+                self._say(cfg.LEVEL_TEXT[2])
             elif self._chime:                    # Level 1: one soft chime
                 self._chime = False
-                self._ws.Beep(cfg.CHIME_HZ, cfg.CHIME_MS)
+                self._play("chime")
+                self._say(cfg.LEVEL_TEXT[1])
             else:
+                self._last_wake = None
                 time.sleep(0.03)
 
     def close(self):
         self._stop = True
+        if self.enabled:
+            self._thread.join(timeout=2)
+        if self.voice:
+            self.voice.close()
+
+
+# ---------------------------------------------------------------- alert log
+def trigger_reason(name):
+    """Plain-language reason for a trigger, using the current thresholds."""
+    return {
+        "long_yawn": f"Yawn lasting {cfg.YAWN_LONG_S:g} s or more",
+        "frequent_yawns": f"{cfg.YAWN_COUNT} yawns within {cfg.YAWN_COUNT_WINDOW_S / 60:g} min",
+        "perclos_caution": f"PERCLOS at or above {cfg.PERCLOS_CAUTION:.0%}",
+        "perclos_warning": f"PERCLOS at or above {cfg.PERCLOS_WARNING:.0%}",
+        "repeated_closures": (f"Eyes closed {cfg.LONG_CLOSURE_S:g} s or more, "
+                              f"{cfg.LONG_CLOSURE_COUNT} times within {cfg.LONG_CLOSURE_WINDOW_S:g} s"),
+        "eyes_closed": f"Eyes closed continuously for {cfg.SUSTAINED_CLOSURE_S:g} s",
+        "microsleep": f"Eyes closed continuously for {cfg.MICROSLEEP_S:g} s or more (microsleep)",
+    }[name]
+
+
+class AlertLog:
+    """Session log of every alert (Levels 1-3): events/alerts_<start>.json.
+    Rewritten after each alert, so it is complete even if the demo crashes."""
+
+    def __init__(self, out_dir=None, source=""):
+        self.out_dir = out_dir or cfg.EVENTS_DIR
+        self.path = self.out_dir / f"alerts_{datetime.now():%Y%m%d_%H%M%S}.json"
+        self.source = source
+        self.alerts = []
+
+    def add(self, event):
+        self.alerts.append({
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "session_time_s": event["time"],
+            "level": event["level"],
+            "level_name": cfg.LEVEL_NAMES[event["level"]],
+            "trigger": event["trigger"],
+            "reason": event["reason"],
+            "perclos": event["perclos"],
+        })
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"source": self.source, "alerts": self.alerts}, indent=2))
 
 
 # ---------------------------------------------------------------- recording
 class EventRecorder:
     """Keeps the last 5 s of frames in memory. On a Level 2/3 event it saves
-    5 s before + 5 s after as an MJPEG .avi plus a JSON log. Nothing is
+    5 s before + 5 s after as a 640x480 MJPEG .avi plus a JSON log. Nothing is
     written to disk unless an event happens."""
 
     def __init__(self, out_dir=None, source=""):
@@ -285,7 +446,7 @@ class EventRecorder:
             n += 1
             path = self.out_dir / f"{stem}_{n}.avi"
         writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"),
-                                 cfg.TARGET_FPS, cfg.FRAME_SIZE)
+                                 cfg.TARGET_FPS, cfg.CLIP_SIZE)
         for frame in clip["frames"]:
             writer.write(frame)
         writer.release()
@@ -295,6 +456,7 @@ class EventRecorder:
             "level": ev["level"],
             "level_name": cfg.LEVEL_NAMES[ev["level"]],
             "trigger": ev["trigger"],
+            "reason": ev["reason"],
             "perclos": ev["perclos"],
             "source": self.source,
             "clip": path.name,

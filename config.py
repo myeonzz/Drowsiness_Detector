@@ -52,8 +52,20 @@ AUG_LOWRES_RANGE = (28, 64)        # downscale to this size, then back to 96
 REPRESENTATIVE_SAMPLES = 300       # for INT8 calibration
 
 # ------------------------------------------------------------- real time ---
-TARGET_FPS = 10
-FRAME_SIZE = (640, 480)            # all processing/recording at this size
+TARGET_FPS = 10                    # processing is capped at this rate
+# Every frame is resized to this resolution before any detection.
+#   "svga": 800x600 (4:3) - Aizu's processing resolution on the ESP32-S3
+#   "720p": 1280x720      - optional; this is the device's ceiling
+PROCESS_RES = "svga"
+PROCESS_RES_PRESETS = {"svga": (800, 600), "720p": (1280, 720)}
+FRAME_SIZE = PROCESS_RES_PRESETS[PROCESS_RES]
+# The webcam is opened at its native resolution: the first of these sizes the
+# camera accepts (otherwise its default), then resized to FRAME_SIZE.
+CAMERA_NATIVE_TRY = ((1920, 1080), (1280, 720))
+# "160-degree mode" (W key): shrink the frame by this factor and scale it back
+# up before detection, to mimic the low pixel density of the 160-degree lens
+# (800x600 -> 400x300 -> 800x600).
+LENS160_SCALE = 0.5
 MODEL_VARIANT = "int8"             # "int8" or "float" TFLite model in the demo
 
 # -------------------------------------------------- per-frame decisions ---
@@ -106,14 +118,20 @@ STOP_DRIVING_TEXT = "Stop driving"
 EYES_NOT_VISIBLE_TEXT = "Eyes not visible"
 
 # ---------------------------------------------------------------- sounds ---
-CHIME_HZ, CHIME_MS = 880, 350              # Level 1: one soft chime
-BEEP_HZ, BEEP_MS, BEEP_REPEAT_S = 1500, 150, 10.0   # Level 2: 3 beeps / 10 s
-ALARM_HZ, ALARM_MS = 2800, 500             # Level 3: continuous alarm
+# Generated tones, louder and harsher at each level (volume is 0-1).
+CHIME_HZ, CHIME_MS, CHIME_VOLUME = (880, 1175), 280, 0.25    # Level 1: soft two-note chime
+BEEP_HZ, BEEP_MS, BEEP_GAP_MS, BEEP_VOLUME = 1800, 130, 90, 0.6   # Level 2: 3 sharp beeps
+BEEP_REPEAT_S = 10.0                                         # ... every 10 s
+ALARM_HZ, ALARM_MS, ALARM_VOLUME = (2400, 3000), 250, 1.0    # Level 3: two-tone alarm
+VOICE_ENABLED = True               # speak the alert text (needs pyttsx3)
+VOICE_RATE = 175                   # words per minute
+WAKE_UP_REPEAT_S = 3.0             # "WAKE UP" is spoken this often during the alarm
 
 # ------------------------------------------------------- event recording ---
 RECORD_LEVELS = (2, 3)             # only these levels are recorded
 CLIP_PRE_S = 5.0
 CLIP_POST_S = 5.0
+CLIP_SIZE = (640, 480)             # saved clips are scaled to this size
 RECORD_OVERLAY = True              # save the annotated frame (False = raw frame)
 
 # ------------------------------------------------------------- scenarios ---
