@@ -21,7 +21,7 @@ MediaPipe Face Landmarker finds the face and eyes. The same crop code
 | `common.py` | Face landmarks, crops, preprocessing, augmentation, split, TFLite runner |
 | `train.py` | Trains both models, saves `.keras`, float TFLite and INT8 TFLite |
 | `evaluate.py` | Test-set metrics and charts for float vs INT8 |
-| `alerts.py` | PERCLOS, 4-level alert logic, sounds, event clip recorder |
+| `alerts.py` | Offense-count alert logic, sounds, alert log, event clip recorder |
 | `demo.py` | Real-time demo (webcam or video file) |
 | `scenarios.py` | Runs the test videos in `./scenarios`, writes `results/scenarios.csv` |
 | `test_alerts.py` | Checks the alert rules with made-up signals |
@@ -104,35 +104,50 @@ Video files go through the same resize, so scenario results match the live demo.
 | `results\<model>_training_curves.png` | Training / validation accuracy and loss |
 | `results\face_dropped.json` | yawn / no_yawn images dropped because no face was found |
 | `results\scenarios.csv` | Expected vs highest level per scenario video |
-| `events\*.avi` + `*.json` | 10 s clip (5 s before + 5 s after) and log for each Level 2/3 event |
-| `events\alerts_<start time>.json` | One log per demo session listing every alert (Levels 1-3): time, level, trigger and reason |
+| `events\*.avi` + `*.json` | 10 s clip (5 s before + 5 s after) and log for each event that results in Level 2 or 3 |
+| `events\alerts_<start time>.json` | One log per demo session listing every offense and override: time, level, trigger, reason and offense count |
 
-## Alert levels
+## Alert levels (offense count)
 
-| Level | Trigger | Sound | Voice / text |
+An **offense** is one of:
+
+- eyes closed continuously for 2 s or more (P(Closed) >= 0.7; one open frame
+  does not reset the closure), or
+- a yawn lasting 4 s or more.
+
+Each event is one offense; a long event still counts once. Offenses are
+counted over a rolling 10-minute window, and the count sets the level:
+
+| Level | Offenses in the last 10 min | Sound | Voice / text |
 |---|---|---|---|
-| 0 NORMAL (green) | - | none | none |
-| 1 CAUTION (yellow) | a yawn of 4 s or more, or 3 yawns in 10 min, or PERCLOS >= 15% | one soft two-note chime, once per trigger | "Signs of fatigue. Consider a break." |
-| 2 WARNING (orange) | eyes closed continuously >= 2 s, or PERCLOS >= 25%, or eyes closed >= 1 s twice within 60 s | 3 short sharp beeps, repeated every 10 s while at Level 2 | "Drowsiness detected. Pull over soon." |
-| 3 CRITICAL (red) | eyes closed continuously >= 3 s | continuous loud two-tone alarm; stops only after the eyes are open for 2 s straight | "WAKE UP" (spoken every 3 s during the alarm) |
+| 0 NORMAL (green) | 0 | none | none |
+| 1 CAUTION (yellow) | 1 | one soft two-note chime, once per offense | "Signs of fatigue. Consider a break." |
+| 2 WARNING (orange) | 2 | 3 short sharp beeps, repeated every 10 s while at Level 2 | "Drowsiness detected. Pull over soon." |
+| 3 CRITICAL (red) | 3 or more, **or** eyes closed continuously for 3 s (override, whatever the count) | continuous loud two-tone alarm; stops only after the eyes are open for 2 s straight | "WAKE UP" (spoken every 3 s during the alarm) |
+
+Rules implemented in `alerts.py`:
+
+- The level drops one step each time the oldest offense leaves the 10-minute window.
+- The 3 s override does not add a second offense for the same closure. It
+  holds Level 3 until that closure leaves the window; the level then follows
+  the offense count again.
+- The alarm starts on every event that results in Level 3. The banner stays
+  red after the alarm stops, until the level drops.
+- If the eyes are not visible for 3 s (dark sunglasses, no face), eye status
+  becomes "unknown", the screen shows "Eyes not visible" and only yawns are
+  counted. An alarm that starts while the eyes are hidden stops after 5 s,
+  because there are no eyes to wait for.
+- The screen shows the offense count and a window timer (time until the
+  oldest offense leaves, which is when the level next drops). PERCLOS (60 s)
+  is still shown for information; it no longer triggers anything.
+- Every offense and override is written to `events\alerts_<start time>.json`
+  with time, level, trigger, reason and offense count. Events that result in
+  Level 2 or 3 also save a 10 s clip.
 
 The tones are generated with numpy and played with `winsound`, so no audio
 files are needed. The text is spoken with `pyttsx3` (Windows voice); if that is
 missing or fails, the text is shown on screen only. `VOICE_ENABLED = False`
 in `config.py` turns the voice off.
-
-Rules implemented in `alerts.py`:
-
-- Two Level-3 events within 5 min hold Level 2 as the minimum for 10 min ("Stop driving").
-- The level drops one step only after 60 s with no trigger at that level.
-- A frame counts as closed only if P(Closed) >= 0.7. One open frame does not reset a closure.
-- If the eyes are not visible for 3 s (dark sunglasses, no face), eye status
-  becomes "unknown", the screen shows "Eyes not visible" and only the
-  yawn-based Level 1 triggers are used.
-- PERCLOS needs 10 s of eye data before it can trigger, so one blink in the
-  first second does not raise an alert.
-- The same trigger cannot log, chime or record again within 60 s (a PERCLOS
-  hovering around a threshold would otherwise repeat). Each microsleep always counts.
 
 All thresholds are in `config.py`.
 
@@ -145,8 +160,8 @@ keyword in the file name (`SCENARIO_EXPECTED` in `config.py`):
 |---|---|
 | `alert.mp4` | 0 |
 | `normal_blinking.mp4` | 0 |
-| `slow_eye_closure.mp4` | 3 (eyes closed for 3 s or more) |
-| `yawning.mp4` | 1 (hold one yawn for 4 s or more) |
+| `slow_eye_closure.mp4` | 3 (eyes closed for 3 s or more: override) |
+| `yawning.mp4` | 1 (one yawn held for 4 s or more = 1 offense) |
 | `sunglasses.mp4` | 0 (eye status should become "unknown") |
 | `low_light.mp4` | 0 |
 

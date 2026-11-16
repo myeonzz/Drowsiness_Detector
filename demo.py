@@ -118,7 +118,11 @@ def open_camera(index):
 
 # ---------------------------------------------------------------- overlay ---
 def _text(img, text, org, scale=0.6, color=(255, 255, 255), thick=1):
-    cv2.putText(img, text, org, FONT, scale, (0, 0, 0), thick + 2, cv2.LINE_AA)
+    # Black outline from shifted copies at the same thickness. (A thicker
+    # stroke changes the letter spacing in OpenCV 5, which shows as ghosting.)
+    x, y = org
+    for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+        cv2.putText(img, text, (x + dx, y + dy), FONT, scale, (0, 0, 0), thick, cv2.LINE_AA)
     cv2.putText(img, text, org, FONT, scale, color, thick, cv2.LINE_AA)
 
 
@@ -159,10 +163,14 @@ def draw_overlay(frame, det, state, fps, wide=False, muted=False):
     else:
         face_line = "Face: not found"
     perclos = f"PERCLOS (60 s): {state['perclos'] * 100:.1f}%"
-    if not state["perclos_ok"]:
-        perclos += " (warming up)"
-    lines = [eye_line, face_line, perclos, f"Yawns (10 min): {state['yawn_count']}",
-             f"FPS: {fps:.1f}"]
+    window_min = cfg.OFFENSE_WINDOW_S / 60
+    offenses = f"Offenses ({window_min:g} min): {state['offense_count']}"
+    left = state["window_remaining_s"]
+    if left is None:
+        timer = "Window timer: --"
+    else:                                    # time until the oldest offense leaves
+        timer = f"Window timer: {int(left) // 60}:{int(left) % 60:02d} to next drop"
+    lines = [eye_line, face_line, perclos, offenses, timer, f"FPS: {fps:.1f}"]
     for i, line in enumerate(lines):
         _text(img, line, (12, 92 + 24 * i))
 

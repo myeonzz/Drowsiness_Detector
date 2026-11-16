@@ -1,4 +1,4 @@
-"""Alert logic: PERCLOS, closure / yawn tracking, the 4-level tier system,
+"""Alert logic: closure / yawn tracking, the offense-count level system,
 alert sounds, the alert log and event-triggered clip recording. No camera code here, so the
 logic can be tested with made-up signals (see test_alerts.py)."""
 import io
@@ -51,153 +51,133 @@ class _Run:
 
 
 class AlertEngine:
-    """Feed one sample per processed frame with update(); read the state dict."""
+    """Offense-count alert logic. Feed one sample per processed frame with
+    update(); read the returned state dict.
+
+    Offense = eyes closed continuously >= 2 s, or a yawn lasting >= 4 s. One
+    long event counts once. Level = offenses in the last 10 minutes
+    (0, 1, 2, 3+). Eyes closed >= 3 s goes straight to Level 3."""
 
     def __init__(self):
         self.level = 0
-        self.level_entered = 0.0
-        self.last_trigger = {1: None, 2: None, 3: None}
-        self.eye_samples = deque()                 # (t, closed) for PERCLOS
+        self.offenses = deque()                    # (t, kind) inside the window
+        self.microsleep_t = None                   # time of the last >= 3 s closure
+        self.eye_samples = deque()                 # (t, closed) for PERCLOS (display only)
         self.closure = _Run(cfg.OPEN_FRAME_TOLERANCE)
         self.closure_flags = set()                 # thresholds passed by this closure
-        self.long_closures = deque()               # times of >= 1 s closures
-        self.l3_events = deque()                   # times of microsleeps
         self.yawn = _Run(cfg.YAWN_FRAME_TOLERANCE)
-        self.yawn_times = deque()                  # end times of counted yawns
+        self.yawn_counted = False                  # this yawn is already an offense
         self.alarm = False                         # Level-3 alarm sounding
+        self.alarm_timeout = None                  # only when the eyes are not visible
         self.open_since = None
         self.unseen_since = None                   # eyes not visible since
         self.eyes_unknown = False
-        self.hold_until = None                     # "Stop driving" Level-2 floor
-        self.prev_triggers = set()
-        self.last_event = {}                       # trigger name -> last event time
         self.max_level = 0
         self.max_level_time = 0.0
 
-    # ------------------------------------------------------------ helpers --
-    @staticmethod
-    def _prune(dq, t, window, key=lambda v: v):
-        while dq and t - key(dq[0]) > window:
-            dq.popleft()
-
     def perclos(self):
-        """(value 0-1, enough_data). Share of closed frames in the last 60 s."""
+        """Share of closed frames in the last 60 s (shown on screen only)."""
         if not self.eye_samples:
-            return 0.0, False
-        closed = sum(1 for _, c in self.eye_samples if c)
-        span = self.eye_samples[-1][0] - self.eye_samples[0][0]
-        return closed / len(self.eye_samples), span >= cfg.PERCLOS_MIN_DATA_S
+            return 0.0
+        return sum(1 for _, c in self.eye_samples if c) / len(self.eye_samples)
+
+    def _level(self, t):
+        if self.microsleep_t is not None and t - self.microsleep_t <= cfg.OFFENSE_WINDOW_S:
+            return 3                               # override holds while in the window
+        return min(len(self.offenses), 3)
+
+    def _start_alarm(self, t, eyes_open_now):
+        self.alarm = True
+        # "open for 2 s straight" is counted from the moment the alarm starts
+        self.open_since = t if eyes_open_now else None
+        # with the eyes hidden (sunglasses) there is nothing to wait for
+        self.alarm_timeout = t + cfg.ALARM_NO_EYES_S if self.eyes_unknown else None
 
     # ------------------------------------------------------------- update --
     def update(self, t, p_closed, p_yawn):
         """t: seconds. p_closed: P(eyes closed) or None if eyes not visible.
         p_yawn: P(yawn) or None if no face. Returns the current state dict."""
+        new = []                                   # (trigger, is_offense) this frame
+
         # ---- eyes ----
+        eyes_open_now = False
         if p_closed is None:
             self.open_since = None
             if self.unseen_since is None:
                 self.unseen_since = t
             if t - self.unseen_since >= cfg.EYES_UNKNOWN_AFTER_S and not self.eyes_unknown:
-                self.eyes_unknown = True
+                self.eyes_unknown = True           # from here on: yawn offenses only
                 self.closure.reset()
                 self.closure_flags.clear()
             eye_status = "unknown" if self.eyes_unknown else "?"
         else:
             self.unseen_since, self.eyes_unknown = None, False
             closed = p_closed >= cfg.CLOSED_CONF_MIN
+            eyes_open_now = not closed
             eye_status = "closed" if closed else "open"
             self.eye_samples.append((t, closed))
             if self.closure.update(t, closed) is not None:
-                self.closure_flags.clear()
+                self.closure_flags.clear()         # closure ended
             if closed:
                 self.open_since = None
             elif self.open_since is None:
                 self.open_since = t
-            if self.closure.duration >= cfg.LONG_CLOSURE_S and "long" not in self.closure_flags:
-                self.closure_flags.add("long")
-                self.long_closures.append(t)
+            if (self.closure.duration >= cfg.OFFENSE_CLOSURE_S
+                    and "offense" not in self.closure_flags):
+                self.closure_flags.add("offense")  # one long closure counts once
+                new.append(("eye_closure", True))
             if self.closure.duration >= cfg.MICROSLEEP_S and "micro" not in self.closure_flags:
                 self.closure_flags.add("micro")
-                self.l3_events.append(t)
-                self.alarm = True
-                if len(self.l3_events) >= cfg.ESCALATION_L3_COUNT:
-                    self.hold_until = t + cfg.ESCALATION_HOLD_S
-            if (self.alarm and self.open_since is not None
-                    and t - self.open_since >= cfg.ALARM_OPEN_RELEASE_S):
-                self.alarm = False
-
-        self._prune(self.eye_samples, t, cfg.PERCLOS_WINDOW_S, key=lambda v: v[0])
-        self._prune(self.long_closures, t, cfg.LONG_CLOSURE_WINDOW_S)
-        self._prune(self.l3_events, t, cfg.ESCALATION_WINDOW_S)
+                self.microsleep_t = t
+                new.append(("microsleep", False))  # same closure: no extra offense
+        while self.eye_samples and t - self.eye_samples[0][0] > cfg.PERCLOS_WINDOW_S:
+            self.eye_samples.popleft()
 
         # ---- yawns ----
         yawning = p_yawn is not None and p_yawn >= cfg.YAWN_CONF_MIN
-        ended = self.yawn.update(t, yawning)
-        if ended is not None and ended >= cfg.YAWN_COUNT_MIN_S:
-            self.yawn_times.append(t)
-        self._prune(self.yawn_times, t, cfg.YAWN_COUNT_WINDOW_S)
+        if self.yawn.update(t, yawning) is not None:
+            self.yawn_counted = False              # yawn ended
+        if self.yawn.duration >= cfg.OFFENSE_YAWN_S and not self.yawn_counted:
+            self.yawn_counted = True               # one long yawn counts once
+            new.append(("long_yawn", True))
 
-        # ---- triggers: name -> level ----
-        perclos, perclos_ok = self.perclos()
-        triggers = {}
-        if self.yawn.duration >= cfg.YAWN_LONG_S:
-            triggers["long_yawn"] = 1
-        if len(self.yawn_times) >= cfg.YAWN_COUNT:
-            triggers["frequent_yawns"] = 1
-        if not self.eyes_unknown:              # eye-based triggers need visible eyes
-            if perclos_ok and perclos >= cfg.PERCLOS_CAUTION:
-                triggers["perclos_caution"] = 1
-            if perclos_ok and perclos >= cfg.PERCLOS_WARNING:
-                triggers["perclos_warning"] = 2
-            if len(self.long_closures) >= cfg.LONG_CLOSURE_COUNT:
-                triggers["repeated_closures"] = 2
-            if self.closure.duration >= cfg.SUSTAINED_CLOSURE_S:
-                triggers["eyes_closed"] = 2
-        if self.alarm:
-            triggers["microsleep"] = 3
-
-        # An event = a trigger switching on. A trigger hovering around its
-        # threshold must not fire again and again, hence the cooldown
-        # (every microsleep is its own event, so it has none).
+        # ---- offenses in the rolling window -> level ----
+        while self.offenses and t - self.offenses[0][0] > cfg.OFFENSE_WINDOW_S:
+            self.offenses.popleft()                # oldest offense leaves: level drops
         events = []
-        for name, lvl in triggers.items():
-            if name in self.prev_triggers:
-                continue
-            last = self.last_event.get(name)
-            if name != "microsleep" and last is not None and t - last < cfg.EVENT_COOLDOWN_S:
-                continue
-            self.last_event[name] = t
-            events.append({"time": round(t, 2), "level": lvl, "trigger": name,
-                           "reason": trigger_reason(name), "perclos": round(perclos, 4)})
-        self.prev_triggers = set(triggers)
-
-        # ---- level: escalate at once, de-escalate one step per quiet 60 s ----
-        top = max(triggers.values(), default=0)
-        for lvl in (1, 2, 3):
-            if top >= lvl:
-                self.last_trigger[lvl] = t
-        stop_driving = self.hold_until is not None and t < self.hold_until
-        floor = 2 if stop_driving else 0
-        if top > self.level:
-            self.level, self.level_entered = top, t
-        elif self.level > floor:
-            quiet_from = max(self.level_entered, self.last_trigger[self.level] or 0.0)
-            if t - quiet_from >= cfg.DEESCALATE_AFTER_S:
-                self.level, self.level_entered = self.level - 1, t
-        if self.level < floor:
-            self.level, self.level_entered = floor, t
+        perclos = self.perclos()
+        for trigger, is_offense in new:
+            if is_offense:
+                self.offenses.append((t, trigger))
+            level = self._level(t)
+            events.append({
+                "time": round(t, 2), "level": level, "trigger": trigger,
+                "reason": trigger_reason(trigger), "offense_count": len(self.offenses),
+                "perclos": round(perclos, 4),
+            })
+            if level == 3:
+                self._start_alarm(t, eyes_open_now)
+        self.level = self._level(t)
         if self.level > self.max_level:
             self.max_level, self.max_level_time = self.level, t
 
-        text = cfg.LEVEL_TEXT[self.level]
-        if stop_driving and self.level == 2:
-            text = cfg.STOP_DRIVING_TEXT
+        # ---- Level-3 alarm: stops only after the eyes are open 2 s straight ----
+        if self.alarm:
+            opened = (self.open_since is not None
+                      and t - self.open_since >= cfg.ALARM_OPEN_RELEASE_S)
+            timed_out = self.alarm_timeout is not None and t >= self.alarm_timeout
+            if opened or (timed_out and self.eyes_unknown):
+                self.alarm = False
+
+        oldest = self.offenses[0][0] if self.offenses else None
         return {
-            "t": t, "level": self.level, "text": text, "alarm": self.alarm,
-            "perclos": perclos, "perclos_ok": perclos_ok, "eye_status": eye_status,
+            "t": t, "level": self.level, "text": cfg.LEVEL_TEXT[self.level],
+            "alarm": self.alarm, "perclos": perclos, "eye_status": eye_status,
             "eyes_unknown": self.eyes_unknown, "yawning": yawning,
-            "yawn_count": len(self.yawn_times), "stop_driving": stop_driving,
-            "triggers": triggers, "events": events,
+            "offense_count": len(self.offenses),
+            # seconds until the oldest offense leaves the window (None if no offenses)
+            "window_remaining_s": None if oldest is None else cfg.OFFENSE_WINDOW_S - (t - oldest),
+            "events": events,
         }
 
 
@@ -289,7 +269,7 @@ class Voice:
 
 class SoundPlayer:
     """Escalating alert sounds on a background thread.
-    Level 1: one soft chime per trigger. Level 2: 3 sharp beeps every 10 s.
+    Level 1: one soft chime per offense. Level 2: 3 sharp beeps every 10 s.
     Level 3: continuous loud alarm while the engine's alarm flag is on (it
     clears only after the eyes have been open for 2 s). Each sound comes with
     the spoken alert text when a voice is available."""
@@ -367,21 +347,17 @@ class SoundPlayer:
 
 # ---------------------------------------------------------------- alert log
 def trigger_reason(name):
-    """Plain-language reason for a trigger, using the current thresholds."""
+    """Plain-language reason for an alert, using the current thresholds."""
     return {
-        "long_yawn": f"Yawn lasting {cfg.YAWN_LONG_S:g} s or more",
-        "frequent_yawns": f"{cfg.YAWN_COUNT} yawns within {cfg.YAWN_COUNT_WINDOW_S / 60:g} min",
-        "perclos_caution": f"PERCLOS at or above {cfg.PERCLOS_CAUTION:.0%}",
-        "perclos_warning": f"PERCLOS at or above {cfg.PERCLOS_WARNING:.0%}",
-        "repeated_closures": (f"Eyes closed {cfg.LONG_CLOSURE_S:g} s or more, "
-                              f"{cfg.LONG_CLOSURE_COUNT} times within {cfg.LONG_CLOSURE_WINDOW_S:g} s"),
-        "eyes_closed": f"Eyes closed continuously for {cfg.SUSTAINED_CLOSURE_S:g} s",
-        "microsleep": f"Eyes closed continuously for {cfg.MICROSLEEP_S:g} s or more (microsleep)",
+        "eye_closure": f"Offense: eyes closed continuously for {cfg.OFFENSE_CLOSURE_S:g} s",
+        "long_yawn": f"Offense: yawn lasting {cfg.OFFENSE_YAWN_S:g} s",
+        "microsleep": (f"Override: eyes closed continuously for {cfg.MICROSLEEP_S:g} s "
+                       "(straight to Level 3)"),
     }[name]
 
 
 class AlertLog:
-    """Session log of every alert (Levels 1-3): events/alerts_<start>.json.
+    """Session log of every offense and override: events/alerts_<start>.json.
     Rewritten after each alert, so it is complete even if the demo crashes."""
 
     def __init__(self, out_dir=None, source=""):
@@ -398,6 +374,7 @@ class AlertLog:
             "level_name": cfg.LEVEL_NAMES[event["level"]],
             "trigger": event["trigger"],
             "reason": event["reason"],
+            "offense_count": event["offense_count"],
             "perclos": event["perclos"],
         })
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -457,6 +434,7 @@ class EventRecorder:
             "level_name": cfg.LEVEL_NAMES[ev["level"]],
             "trigger": ev["trigger"],
             "reason": ev["reason"],
+            "offense_count": ev["offense_count"],
             "perclos": ev["perclos"],
             "source": self.source,
             "clip": path.name,

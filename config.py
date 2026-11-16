@@ -82,29 +82,15 @@ EYE_DARK_BOX_SCALE = 0.9           # checked box side = scale * eye-corner dista
 EYES_UNKNOWN_AFTER_S = 3.0         # no visible eyes for this long -> "unknown"
 
 # ---------------------------------------------------------------- alerts ---
-PERCLOS_WINDOW_S = 60.0            # rolling PERCLOS window
-PERCLOS_MIN_DATA_S = 10.0          # need this much eye data before PERCLOS can trigger
-PERCLOS_CAUTION = 0.15             # Level 1
-PERCLOS_WARNING = 0.25             # Level 2
-
-YAWN_LONG_S = 4.0                  # Level 1: one yawn lasting this long
-YAWN_COUNT_MIN_S = 1.0             # a yawn must last this long to be counted
-YAWN_COUNT = 3                     # Level 1: this many yawns ...
-YAWN_COUNT_WINDOW_S = 600.0        # ... within 10 minutes
-
-LONG_CLOSURE_S = 1.0               # Level 2: closures of this length ...
-LONG_CLOSURE_COUNT = 2             # ... at least twice ...
-LONG_CLOSURE_WINDOW_S = 60.0       # ... within 60 s
-
-SUSTAINED_CLOSURE_S = 2.0          # Level 2: eyes closed continuously this long
-MICROSLEEP_S = 3.0                 # Level 3: eyes closed continuously this long
-ALARM_OPEN_RELEASE_S = 2.0         # alarm stops after eyes open this long
-
-ESCALATION_L3_COUNT = 2            # this many Level-3 events ...
-ESCALATION_WINDOW_S = 300.0        # ... within 5 min ...
-ESCALATION_HOLD_S = 600.0          # ... hold Level 2 minimum for 10 min
-DEESCALATE_AFTER_S = 60.0          # drop one level after this long with no trigger
-EVENT_COOLDOWN_S = 60.0            # same trigger cannot log/chime/record again sooner
+# Offense-count system. Level = number of offenses in the rolling window:
+# 0 offenses = Level 0, 1 = Level 1, 2 = Level 2, 3 or more = Level 3.
+OFFENSE_CLOSURE_S = 2.0            # offense: eyes closed continuously this long
+OFFENSE_YAWN_S = 4.0               # offense: one yawn lasting this long
+OFFENSE_WINDOW_S = 600.0           # offenses are counted over the last 10 minutes
+MICROSLEEP_S = 3.0                 # override: eyes closed this long -> Level 3 at once
+ALARM_OPEN_RELEASE_S = 2.0         # Level-3 alarm stops after eyes open this long
+ALARM_NO_EYES_S = 5.0              # alarm length when the eyes are not visible (sunglasses)
+PERCLOS_WINDOW_S = 60.0            # rolling PERCLOS window (shown on screen only)
 
 LEVEL_NAMES = {0: "NORMAL", 1: "CAUTION", 2: "WARNING", 3: "CRITICAL"}
 LEVEL_COLORS_BGR = {0: (60, 170, 60), 1: (0, 215, 255), 2: (0, 140, 255), 3: (0, 0, 230)}
@@ -114,7 +100,6 @@ LEVEL_TEXT = {
     2: "Drowsiness detected. Pull over soon.",
     3: "WAKE UP",
 }
-STOP_DRIVING_TEXT = "Stop driving"
 EYES_NOT_VISIBLE_TEXT = "Eyes not visible"
 
 # ---------------------------------------------------------------- sounds ---
