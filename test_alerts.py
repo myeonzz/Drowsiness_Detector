@@ -40,8 +40,8 @@ def test_low_confidence_closed_is_ignored():
 def test_long_yawn_is_caution():
     s = Sim()
     s.run(12)
-    s.run(2.5, yawn=YAWN)
-    assert s.state["level"] == 0            # under 3 s: nothing yet
+    s.run(3.5, yawn=YAWN)
+    assert s.state["level"] == 0            # under 4 s: nothing yet
     s.run(1.0, yawn=YAWN)
     assert s.state["level"] == 1 and "long_yawn" in s.state["triggers"]
 
@@ -82,15 +82,15 @@ def test_two_long_closures_is_warning():
 def test_one_open_frame_does_not_reset_closure():
     s = Sim()
     s.run(20)
-    s.run(1.2, eye=CLOSED)
+    s.run(1.7, eye=CLOSED)
     s.run(DT, eye=OPEN)                     # single open frame inside the closure
-    s.run(1.0, eye=CLOSED)
+    s.run(1.5, eye=CLOSED)
     assert s.state["level"] == 3
     s2 = Sim()
     s2.run(20)
-    s2.run(1.2, eye=CLOSED)
+    s2.run(1.7, eye=CLOSED)
     s2.run(2 * DT, eye=OPEN)                # two open frames: closure restarts
-    s2.run(1.0, eye=CLOSED)
+    s2.run(1.5, eye=CLOSED)
     assert s2.state["level"] < 3
 
 
@@ -98,8 +98,11 @@ def test_microsleep_alarm_and_deescalation():
     s = Sim()
     s.run(20)
     s.run(1.9, eye=CLOSED)
-    assert s.state["level"] < 3
+    assert s.state["level"] < 2             # under 2 s: no warning yet
     s.run(0.3, eye=CLOSED)
+    assert s.state["level"] == 2 and "eyes_closed" in s.state["triggers"]
+    assert not s.state["alarm"]             # 2 s closure: Level 2, no alarm
+    s.run(0.9, eye=CLOSED)
     assert s.state["level"] == 3 and s.state["alarm"] and s.state["text"] == "WAKE UP"
     s.run(1.5)
     assert s.state["alarm"]                 # eyes open < 2 s: alarm still on
@@ -118,9 +121,9 @@ def test_microsleep_alarm_and_deescalation():
 def test_two_microsleeps_hold_level_2():
     s = Sim()
     s.run(20)
-    s.run(2.5, eye=CLOSED)
+    s.run(3.5, eye=CLOSED)
     s.run(60)
-    s.run(2.5, eye=CLOSED)
+    s.run(3.5, eye=CLOSED)
     s.run(300)                              # 5 quiet minutes later ...
     assert s.state["level"] == 2 and s.state["stop_driving"]
     assert s.state["text"] == cfg.STOP_DRIVING_TEXT
@@ -137,14 +140,14 @@ def test_sunglasses_only_yawn_triggers():
     assert s.state["eyes_unknown"] and s.state["eye_status"] == "unknown"
     s.run(60, eye=None)
     assert s.engine.max_level == 0
-    s.run(3.5, eye=None, yawn=YAWN)
+    s.run(4.5, eye=None, yawn=YAWN)
     assert s.state["level"] == 1
 
 
 def test_events_are_logged_once():
     s = Sim()
     s.run(20)
-    s.run(3.0, eye=CLOSED)
+    s.run(4.0, eye=CLOSED)
     s.run(10)
     micro = [e for e in s.events if e["trigger"] == "microsleep"]
     assert len(micro) == 1 and micro[0]["level"] == 3

@@ -148,6 +148,8 @@ class AlertEngine:
                 triggers["perclos_warning"] = 2
             if len(self.long_closures) >= cfg.LONG_CLOSURE_COUNT:
                 triggers["repeated_closures"] = 2
+            if self.closure.duration >= cfg.SUSTAINED_CLOSURE_S:
+                triggers["eyes_closed"] = 2
         if self.alarm:
             triggers["microsleep"] = 3
 

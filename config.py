@@ -75,7 +75,7 @@ PERCLOS_MIN_DATA_S = 10.0          # need this much eye data before PERCLOS can 
 PERCLOS_CAUTION = 0.15             # Level 1
 PERCLOS_WARNING = 0.25             # Level 2
 
-YAWN_LONG_S = 3.0                  # Level 1: one yawn lasting this long
+YAWN_LONG_S = 4.0                  # Level 1: one yawn lasting this long
 YAWN_COUNT_MIN_S = 1.0             # a yawn must last this long to be counted
 YAWN_COUNT = 3                     # Level 1: this many yawns ...
 YAWN_COUNT_WINDOW_S = 600.0        # ... within 10 minutes
@@ -84,7 +84,8 @@ LONG_CLOSURE_S = 1.0               # Level 2: closures of this length ...
 LONG_CLOSURE_COUNT = 2             # ... at least twice ...
 LONG_CLOSURE_WINDOW_S = 60.0       # ... within 60 s
 
-MICROSLEEP_S = 2.0                 # Level 3: eyes closed continuously this long
+SUSTAINED_CLOSURE_S = 2.0          # Level 2: eyes closed continuously this long
+MICROSLEEP_S = 3.0                 # Level 3: eyes closed continuously this long
 ALARM_OPEN_RELEASE_S = 2.0         # alarm stops after eyes open this long
 
 ESCALATION_L3_COUNT = 2            # this many Level-3 events ...

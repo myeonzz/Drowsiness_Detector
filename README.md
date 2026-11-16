@@ -85,9 +85,9 @@ folder first.
 | Level | Trigger | Action |
 |---|---|---|
 | 0 NORMAL (green) | - | none |
-| 1 CAUTION (yellow) | a yawn of 3 s or more, or 3 yawns in 10 min, or PERCLOS >= 15% | one chime, "Signs of fatigue. Consider a break." |
-| 2 WARNING (orange) | PERCLOS >= 25%, or eyes closed >= 1 s twice within 60 s | 3 beeps every 10 s, "Drowsiness detected. Pull over soon." |
-| 3 CRITICAL (red) | eyes closed continuously >= 2 s | continuous alarm until eyes are open 2 s, "WAKE UP" |
+| 1 CAUTION (yellow) | a yawn of 4 s or more, or 3 yawns in 10 min, or PERCLOS >= 15% | one chime, "Signs of fatigue. Consider a break." |
+| 2 WARNING (orange) | eyes closed continuously >= 2 s, or PERCLOS >= 25%, or eyes closed >= 1 s twice within 60 s | 3 beeps every 10 s, "Drowsiness detected. Pull over soon." |
+| 3 CRITICAL (red) | eyes closed continuously >= 3 s | continuous alarm until eyes are open 2 s, "WAKE UP" |
 
 Rules implemented in `alerts.py`:
 
@@ -113,8 +113,8 @@ keyword in the file name (`SCENARIO_EXPECTED` in `config.py`):
 |---|---|
 | `alert.mp4` | 0 |
 | `normal_blinking.mp4` | 0 |
-| `slow_eye_closure.mp4` | 3 (eyes closed for 2 s or more) |
-| `yawning.mp4` | 1 (hold one yawn for 3 s or more) |
+| `slow_eye_closure.mp4` | 3 (eyes closed for 3 s or more) |
+| `yawning.mp4` | 1 (hold one yawn for 4 s or more) |
 | `sunglasses.mp4` | 0 (eye status should become "unknown") |
 | `low_light.mp4` | 0 |
 
