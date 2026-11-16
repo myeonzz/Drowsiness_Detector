@@ -15,6 +15,11 @@ import config
 # Landmark indices (MediaPipe face mesh topology): eye corners.
 RIGHT_EYE_CORNERS = (33, 133)
 LEFT_EYE_CORNERS = (362, 263)
+# Lips: inner-lip midpoints, inner mouth corners, and the outer outline
+# (left corner, right corner, top of upper lip, bottom of lower lip).
+INNER_LIP_TOP, INNER_LIP_BOTTOM = 13, 14
+INNER_MOUTH_CORNERS = (78, 308)
+MOUTH_OUTLINE = (61, 291, 0, 17)
 
 
 # ----------------------------------------------------------- face finder ---
@@ -96,6 +101,23 @@ def eye_boxes(landmarks, shape):
     return boxes
 
 
+def mouth_aspect_ratio(landmarks):
+    """MAR = vertical inner-lip opening / mouth width (inner corners).
+    About 0 with the mouth closed, large when it is wide open."""
+    opening = float(np.linalg.norm(landmarks[INNER_LIP_TOP] - landmarks[INNER_LIP_BOTTOM]))
+    width = float(np.linalg.norm(landmarks[INNER_MOUTH_CORNERS[0]] - landmarks[INNER_MOUTH_CORNERS[1]]))
+    return opening / (width + 1e-6)
+
+
+def mouth_box(landmarks, shape):
+    """Square box around the mouth; grows with the mouth when it opens."""
+    pts = landmarks[list(MOUTH_OUTLINE)]
+    x0, y0 = pts.min(axis=0)
+    x1, y1 = pts.max(axis=0)
+    side = max(x1 - x0, y1 - y0) * config.MOUTH_CROP_SCALE
+    return _square_box((x0 + x1) / 2, (y0 + y1) / 2, side, shape)
+
+
 def crop(img, box):
     x0, y0, x1, y1 = box
     return img[y0:y1, x0:x1]
@@ -165,12 +187,15 @@ def load_split(name):
     data = np.load(config.CACHE_DIR / f"{name}.npz")
     X, y = data["X"], data["y"]
     hold = config.VAL_FRACTION + config.TEST_FRACTION
-    X_tr, X_tmp, y_tr, y_tmp = train_test_split(
-        X, y, test_size=hold, stratify=y, random_state=config.SEED)
-    X_val, X_te, y_val, y_te = train_test_split(
-        X_tmp, y_tmp, test_size=config.TEST_FRACTION / hold, stratify=y_tmp,
-        random_state=config.SEED)
-    return {"train": (X_tr, y_tr), "val": (X_val, y_val), "test": (X_te, y_te)}
+    idx = np.arange(len(y))
+    i_tr, i_tmp = train_test_split(idx, test_size=hold, stratify=y, random_state=config.SEED)
+    i_val, i_te = train_test_split(i_tmp, test_size=config.TEST_FRACTION / hold,
+                                   stratify=y[i_tmp], random_state=config.SEED)
+    split = {"train": (X[i_tr], y[i_tr]), "val": (X[i_val], y[i_val]), "test": (X[i_te], y[i_te])}
+    if "mar" in data:                      # mouth aspect ratio of each photo (mouth model)
+        split["mar"] = {"train": data["mar"][i_tr], "val": data["mar"][i_val],
+                        "test": data["mar"][i_te]}
+    return split
 
 
 def model_path(name, variant):

@@ -74,6 +74,7 @@ class AlertEngine:
         self.eyes_unknown = False
         self.max_level = 0
         self.max_level_time = 0.0
+        self.last_alert = None                     # (t, trigger) of the latest alert
 
     def perclos(self):
         """Share of closed frames in the last 60 s (shown on screen only)."""
@@ -155,6 +156,7 @@ class AlertEngine:
                 "reason": trigger_reason(trigger), "offense_count": len(self.offenses),
                 "perclos": round(perclos, 4),
             })
+            self.last_alert = (t, trigger)
             if level == 3:
                 self._start_alarm(t, eyes_open_now)
         self.level = self._level(t)
@@ -175,6 +177,14 @@ class AlertEngine:
             "alarm": self.alarm, "perclos": perclos, "eye_status": eye_status,
             "eyes_unknown": self.eyes_unknown, "yawning": yawning,
             "offense_count": len(self.offenses),
+            # kind of each offense in the window, oldest first
+            "offense_kinds": [trigger_label(kind) for _, kind in self.offenses],
+            # True while a >= 3 s closure is holding Level 3
+            "override": (self.microsleep_t is not None
+                         and t - self.microsleep_t <= cfg.OFFENSE_WINDOW_S),
+            # latest offense / override: (label, seconds ago), or None
+            "last_alert": None if self.last_alert is None else
+                          (trigger_label(self.last_alert[1]), t - self.last_alert[0]),
             # seconds until the oldest offense leaves the window (None if no offenses)
             "window_remaining_s": None if oldest is None else cfg.OFFENSE_WINDOW_S - (t - oldest),
             "events": events,
@@ -346,6 +356,15 @@ class SoundPlayer:
 
 
 # ---------------------------------------------------------------- alert log
+def trigger_label(name):
+    """Short on-screen name for the kind of offense."""
+    return {
+        "eye_closure": f"Eyes closed {cfg.OFFENSE_CLOSURE_S:g} s",
+        "long_yawn": f"Yawn {cfg.OFFENSE_YAWN_S:g} s",
+        "microsleep": f"Eyes closed {cfg.MICROSLEEP_S:g} s (override)",
+    }[name]
+
+
 def trigger_reason(name):
     """Plain-language reason for an alert, using the current thresholds."""
     return {

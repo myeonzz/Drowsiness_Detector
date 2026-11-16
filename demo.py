@@ -5,10 +5,13 @@
     python demo.py --source scenarios\\yawning.mp4
     python demo.py --mute --no-record
 
-Keys:  W = 160-degree mode on/off   M = mute on/off   Q or Esc = quit
+Keys:  W = 160-degree mode on/off   M = mute on/off
+       C = recalibrate the yawn threshold   Q or Esc = quit
 """
 import argparse
+import csv
 import time
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -22,28 +25,72 @@ WINDOW = "Aizu - drowsiness monitor"
 
 
 class Pipeline:
-    """frame -> face landmarks -> eye crops -> eye model, face crop -> face model."""
+    """frame -> face landmarks -> eye crops -> eye model (eyes closed?)
+                               -> lip landmarks -> MAR, optionally confirmed by
+                                  the mouth-crop CNN (yawning?)."""
 
     def __init__(self, variant=None):
         variant = variant or cfg.MODEL_VARIANT
         self.finder = common.FaceFinder(video=True)
         self.eye_model = common.TFLiteModel(common.model_path("eye", variant))
-        self.face_model = common.TFLiteModel(common.model_path("face", variant))
+        self.mouth_model = (common.TFLiteModel(common.model_path("mouth", variant))
+                            if cfg.YAWN_USE_CNN else None)
+        self.mar_threshold = cfg.MAR_THRESHOLD_MANUAL     # None until calibrated
+        self.mar_baseline = None
+        self.calibration_note = "manual" if self.mar_threshold is not None else ""
+        self._calib_start, self._calib = None, []
+
+    def recalibrate(self):
+        """Start the 5 s MAR calibration again (C key)."""
+        self.mar_threshold, self.mar_baseline = None, None
+        self._calib_start, self._calib = None, []
+
+    def _calibrate(self, mar, t):
+        """Collect closed-mouth MAR for a few seconds, then set the threshold.
+        Returns the seconds of calibration left."""
+        if self._calib_start is None:
+            self._calib_start = t
+        self._calib.append(mar)
+        left = cfg.MAR_CALIBRATION_S - (t - self._calib_start)
+        if left > 0:
+            return left
+        baseline = float(np.median(self._calib))
+        if baseline > cfg.MAR_BASELINE_MAX:   # mouth was open: do not trust it
+            baseline, self.calibration_note = cfg.MAR_BASELINE_DEFAULT, "default (mouth was open)"
+        else:
+            self.calibration_note = "calibrated"
+        self.mar_baseline = baseline
+        self.mar_threshold = max(baseline + cfg.MAR_YAWN_OFFSET, cfg.MAR_THRESHOLD_MIN)
+        return 0.0
 
     def process(self, frame, t):
-        """Returns p_closed / p_yawn (None when not measurable) and the boxes."""
-        out = {"face_box": None, "eye_boxes": [], "p_closed": None, "p_yawn": None,
-               "face_found": False, "occluded": False}
+        """Returns p_closed / p_yawn (None when not measurable), MAR and boxes.
+        p_yawn is 1.0 / 0.0: the yawn decision for this frame."""
+        out = {"face_box": None, "eye_boxes": [], "mouth_box": None, "p_closed": None,
+               "p_yawn": None, "mar": None, "mar_threshold": self.mar_threshold,
+               "p_mouth_cnn": None, "calibrating": None, "face_found": False,
+               "occluded": False}
         landmarks = self.finder.find(frame, t)
         if landmarks is None:
             return out
         out["face_found"] = True
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
         out["face_box"] = common.face_box(landmarks, frame.shape)
-        if out["face_box"] is not None:      # same face crop as in training
-            face = common.preprocess(common.crop(gray, out["face_box"]))   # 96x96 gray
-            out["p_yawn"] = float(self.face_model.predict(face)[1])
+
+        # ---- yawn: MAR first, mouth CNN must agree if it is enabled ----
+        mar = out["mar"] = common.mouth_aspect_ratio(landmarks)
+        out["mouth_box"] = common.mouth_box(landmarks, frame.shape)
+        if self.mar_threshold is None:
+            out["calibrating"] = self._calibrate(mar, t)
+            out["mar_threshold"] = self.mar_threshold
+            out["p_yawn"] = 0.0               # no yawns are counted while calibrating
+        else:
+            yawning = mar >= self.mar_threshold
+            if yawning and self.mouth_model is not None and out["mouth_box"] is not None:
+                mouth = common.preprocess(common.crop(gray, out["mouth_box"]))   # 96x96 gray
+                out["p_mouth_cnn"] = float(self.mouth_model.predict(mouth)[1])
+                yawning = out["p_mouth_cnn"] >= cfg.YAWN_CNN_MIN
+            out["p_yawn"] = 1.0 if yawning else 0.0
 
         boxes = common.eye_boxes(landmarks, frame.shape)
         out["eye_boxes"] = [b for b in boxes if b is not None]
@@ -133,7 +180,7 @@ def _text_right(img, text, y, scale=0.7, color=(255, 255, 255), thick=2):
     return x, tw
 
 
-def draw_overlay(frame, det, state, fps, wide=False, muted=False):
+def draw_overlay(frame, det, state, fps, wide=False, muted=False, note=""):
     img = frame.copy()
     h, w = img.shape[:2]
     color = cfg.LEVEL_COLORS_BGR[state["level"]]
@@ -141,7 +188,7 @@ def draw_overlay(frame, det, state, fps, wide=False, muted=False):
     if det["face_box"]:
         x0, y0, x1, y1 = det["face_box"]
         cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)
-    for x0, y0, x1, y1 in det["eye_boxes"]:
+    for x0, y0, x1, y1 in det["eye_boxes"] + ([det["mouth_box"]] if det["mouth_box"] else []):
         cv2.rectangle(img, (x0, y0), (x1, y1), (255, 255, 255), 1)
 
     # colored banner with the current level and its message
@@ -157,11 +204,15 @@ def draw_overlay(frame, det, state, fps, wide=False, muted=False):
         eye_line = f"Eyes: unknown - {cfg.EYES_NOT_VISIBLE_TEXT}"
     else:
         eye_line = "Eyes: --"
-    if det["p_yawn"] is not None:
-        p = det["p_yawn"]
-        face_line = f"Mouth: {'yawn' if p >= 0.5 else 'no_yawn'} {max(p, 1 - p):.2f}"
-    else:
+    if det["mar"] is None:
         face_line = "Face: not found"
+    elif det["mar_threshold"] is None:
+        face_line = f"Mouth: MAR {det['mar']:.2f} (calibrating)"
+    else:
+        face_line = (f"Mouth: MAR {det['mar']:.2f} / {det['mar_threshold']:.2f}  "
+                     f"{'YAWN' if det['p_yawn'] else 'no yawn'}")
+        if det["p_mouth_cnn"] is not None:
+            face_line += f"  CNN {det['p_mouth_cnn']:.2f}"
     perclos = f"PERCLOS (60 s): {state['perclos'] * 100:.1f}%"
     window_min = cfg.OFFENSE_WINDOW_S / 60
     offenses = f"Offenses ({window_min:g} min): {state['offense_count']}"
@@ -170,7 +221,16 @@ def draw_overlay(frame, det, state, fps, wide=False, muted=False):
         timer = "Window timer: --"
     else:                                    # time until the oldest offense leaves
         timer = f"Window timer: {int(left) // 60}:{int(left) % 60:02d} to next drop"
-    lines = [eye_line, face_line, perclos, offenses, timer, f"FPS: {fps:.1f}"]
+    lines = [eye_line, face_line, perclos, offenses]
+    kinds = state["offense_kinds"]
+    for i, kind in enumerate(kinds[-4:], start=max(len(kinds) - 4, 0) + 1):
+        lines.append(f"   {i}. {kind}")          # what kind each offense was
+    if state["override"]:                        # why it is Level 3 below 3 offenses
+        lines.append(f"   + Override: eyes closed {cfg.MICROSLEEP_S:g} s")
+    if state["last_alert"]:
+        label, ago = state["last_alert"]
+        lines.append(f"Last: {label}, {int(ago) // 60}:{int(ago) % 60:02d} ago")
+    lines += [timer, f"FPS: {fps:.1f}"]
     for i, line in enumerate(lines):
         _text(img, line, (12, 92 + 24 * i))
 
@@ -184,7 +244,12 @@ def draw_overlay(frame, det, state, fps, wide=False, muted=False):
     if muted:
         _text_right(img, "MUTED", y, color=(200, 200, 200))
 
-    _text(img, "W: 160 mode   M: mute   Q: quit", (w - 292, h - 12), 0.5)
+    if det["calibrating"]:
+        _text(img, f"CALIBRATING {det['calibrating']:.0f} s - mouth closed, normal face",
+              (12, h - 48), 0.8, (0, 255, 255), 2)
+    if note:
+        _text(img, note, (12, h - 84), 1.0, (0, 255, 255), 2)
+    _text(img, "W: 160 mode   M: mute   C: calibrate   Q: quit", (w - 398, h - 12), 0.5)
     if state["eyes_unknown"]:
         _text(img, cfg.EYES_NOT_VISIBLE_TEXT, (12, h - 16), 0.9, (0, 215, 255), 2)
     if state["alarm"] and int(state["t"] * 4) % 2 == 0:       # flashing border
@@ -205,11 +270,36 @@ def _keep_aspect(frame_w, frame_h):
 
 
 # ------------------------------------------------------------------- main ---
+class MarLog:
+    """Per-frame MAR log: events/mar_<start>.csv."""
+
+    def __init__(self, out_dir=None):
+        out_dir = out_dir or cfg.EVENTS_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self.path = out_dir / f"mar_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        self._file = open(self.path, "w", newline="")
+        self._csv = csv.writer(self._file)
+        self._csv.writerow(["time_s", "mar", "threshold", "mouth_cnn", "yawn_frame",
+                            "calibrating"])
+
+    def add(self, t, det):
+        fmt = lambda v: "" if v is None else f"{v:.4f}"
+        self._csv.writerow([f"{t:.2f}", fmt(det["mar"]), fmt(det["mar_threshold"]),
+                            fmt(det["p_mouth_cnn"]),
+                            "" if det["p_yawn"] is None else int(det["p_yawn"]),
+                            int(bool(det["calibrating"]))])
+
+    def close(self):
+        self._file.close()
+
+
 def run(source=0, display=True, sound=True, muted=False, record=True, events_dir=None,
-        variant=None, verbose=True, wide=False, max_seconds=None):
+        variant=None, verbose=True, wide=False, max_seconds=None, on_frame=None):
     """Run the full pipeline on a webcam index or video path. Returns a summary
     (highest level, time it was reached, events). Video files use the video's
-    own clock, so results do not depend on how fast this laptop is."""
+    own clock, so results do not depend on how fast this laptop is.
+    on_frame(t, det, state) is called for every processed frame; the text it
+    returns (if any) is shown on screen."""
     live = isinstance(source, int)
     if live:
         cap, native = open_camera(source)
@@ -237,6 +327,8 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
                                   else "not available, text only"))
     recorder = EventRecorder(events_dir, source=str(source)) if record else None
     alert_log = AlertLog(events_dir, source=str(source)) if record else None
+    mar_log = MarLog(events_dir) if record else None
+    announced = False
     if display:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.resizeWindow(WINDOW, *cfg.FRAME_SIZE)
@@ -268,7 +360,16 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
                 fps = inst if fps == 0 else 0.9 * fps + 0.1 * inst
             last_wall = now
 
-            shown = draw_overlay(frame, det, state, fps, wide, player.muted)
+            if mar_log:
+                mar_log.add(t, det)
+            if verbose and not announced and pipeline.mar_threshold is not None:
+                announced = True
+                base = ("" if pipeline.mar_baseline is None
+                        else f", baseline {pipeline.mar_baseline:.3f}")
+                print(f"Yawn threshold: MAR >= {pipeline.mar_threshold:.3f} "
+                      f"({pipeline.calibration_note}{base})")
+            note = on_frame(t, det, state) if on_frame else ""
+            shown = draw_overlay(frame, det, state, fps, wide, player.muted, note or "")
             player.update(state)
             if recorder:
                 recorder.add_frame(t, to_clip(shown if cfg.RECORD_OVERLAY else frame))
@@ -296,6 +397,9 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
                     wide = not wide
                 if key in (ord("m"), ord("M")):
                     player.muted = not player.muted
+                if key in (ord("c"), ord("C")) and cfg.MAR_THRESHOLD_MANUAL is None:
+                    pipeline.recalibrate()
+                    announced = False
                 if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                     break                                  # window closed with X
             elif live:
@@ -305,6 +409,8 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
         player.close()
         if recorder:
             recorder.close()
+        if mar_log:
+            mar_log.close()
         pipeline.close()
         if display:
             cv2.destroyAllWindows()
@@ -312,6 +418,10 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
     return {
         "duration_s": round(t, 2), "frames": processed, "fps": round(fps, 1),
         "native_resolution": native,
+        "mar_threshold": pipeline.mar_threshold,
+        "mar_baseline": pipeline.mar_baseline,
+        "calibration": pipeline.calibration_note,
+        "mar_log": str(mar_log.path) if mar_log else None,
         "max_level": engine.max_level,
         "time_to_max_s": round(engine.max_level_time, 2) if engine.max_level else None,
         "events": all_events,

@@ -110,6 +110,36 @@ def evaluate_model(name):
     return rows
 
 
+def compare_yawn_methods():
+    """Per-photo yawn decision on the mouth test set: MAR alone, the mouth CNN
+    alone, and both agreeing (the rule the demo uses when YAWN_USE_CNN is on).
+    MAR uses the default (uncalibrated) threshold."""
+    split = common.load_split("mouth")
+    X, y = split["test"]
+    mar = split["mar"]["test"]
+    threshold = max(config.MAR_BASELINE_DEFAULT + config.MAR_YAWN_OFFSET,
+                    config.MAR_THRESHOLD_MIN)
+    model = common.TFLiteModel(common.model_path("mouth", "int8"))
+    cnn = np.array([model.predict(img)[1] for img in X]) >= config.YAWN_CNN_MIN
+    by_mar = mar >= threshold
+    rows = []
+    for label, pred in ((f"MAR >= {threshold:.2f}", by_mar), ("mouth CNN (INT8)", cnn),
+                        ("MAR and CNN agree", by_mar & cnn)):
+        pred = pred.astype(int)
+        rows.append({
+            "method": label, "test_images": len(y),
+            "accuracy": accuracy_score(y, pred),
+            "precision": precision_score(y, pred, zero_division=0),
+            "recall": recall_score(y, pred, zero_division=0),
+            "f1": f1_score(y, pred, zero_division=0),
+            "false_yawns": int(((pred == 1) & (y == 0)).sum()),
+            "missed_yawns": int(((pred == 0) & (y == 1)).sum()),
+        })
+    df = pd.DataFrame(rows)
+    df.to_csv(config.RESULTS_DIR / "yawn_methods.csv", index=False, float_format="%.4f")
+    return df
+
+
 if __name__ == "__main__":
     config.RESULTS_DIR.mkdir(exist_ok=True)
     all_rows = []
@@ -119,4 +149,6 @@ if __name__ == "__main__":
     df.to_csv(config.RESULTS_DIR / "summary.csv", index=False, float_format="%.4f")
     pd.set_option("display.width", 200)
     print(df.round(4).to_string(index=False))
-    print(f"\nSaved charts and summary.csv in {config.RESULTS_DIR}")
+    print("\nYawn decision per photo (mouth test set):")
+    print(compare_yawn_methods().round(4).to_string(index=False))
+    print(f"\nSaved charts, summary.csv and yawn_methods.csv in {config.RESULTS_DIR}")

@@ -1,0 +1,4 @@
+method,test_images,accuracy,precision,recall,f1,false_yawns,missed_yawns
+MAR >= 0.37,215,0.9674,1.0000,0.9346,0.9662,0,7
+mouth CNN (INT8),215,0.9953,0.9907,1.0000,0.9953,1,0
+MAR and CNN agree,215,0.9674,1.0000,0.9346,0.9662,0,7

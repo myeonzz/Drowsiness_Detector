@@ -31,15 +31,17 @@ TEST_FRACTION = 0.15               # -> 70 / 15 / 15 split
 
 # name -> (negative class folder, positive class folder). Index 1 is the
 # "drowsy" class, so model output[1] = P(Closed) or P(yawn).
+# The mouth model sees only a mouth crop cut from the yawn / no_yawn photos.
 MODELS = {
     "eye": ("Open", "Closed"),
-    "face": ("no_yawn", "yawn"),
+    "mouth": ("no_yawn", "yawn"),
 }
 
 # Crop geometry (shared by training and the live demo).
 FACE_MARGIN = 0.10                 # extra border around the landmark box
 EYE_CROP_SCALE = 1.7               # square side = scale * eye-corner distance
 EYE_CROP_SHIFT_UP = 0.12           # shift crop up (fraction of side) to include the brow
+MOUTH_CROP_SCALE = 1.5             # square side = scale * mouth outline size
 
 # -------------------------------------------------------------- training ---
 EPOCHS = 100
@@ -73,6 +75,20 @@ CLOSED_CONF_MIN = 0.70             # count "closed" only if P(Closed) >= this
 YAWN_CONF_MIN = 0.70               # count "yawn" only if P(yawn) >= this
 OPEN_FRAME_TOLERANCE = 1           # open frames allowed inside a closure
 YAWN_FRAME_TOLERANCE = 1           # non-yawn frames allowed inside a yawn
+
+# Yawn detection. Primary signal: Mouth Aspect Ratio from the lip landmarks
+# (MAR = inner-lip opening / mouth width). A yawn frame = MAR at or above the
+# threshold. The threshold is set per driver by a short calibration at
+# startup (mouth closed, normal face): threshold = baseline + MAR_YAWN_OFFSET.
+MAR_THRESHOLD_MANUAL = None        # e.g. 0.40 to skip calibration and force a threshold
+MAR_CALIBRATION_S = 5.0            # length of the startup calibration
+MAR_YAWN_OFFSET = 0.35             # threshold = calibrated baseline + this
+MAR_THRESHOLD_MIN = 0.30           # the threshold never goes below this
+MAR_BASELINE_DEFAULT = 0.02        # used when calibration is rejected
+MAR_BASELINE_MAX = 0.20            # calibration is rejected if the mouth was open
+# Secondary check: the mouth-crop CNN must also say "yawn" before a frame counts.
+YAWN_USE_CNN = True
+YAWN_CNN_MIN = 0.50                # P(yawn) from the mouth CNN needed to agree
 
 # Sunglasses / occlusion check: eyes are "not visible" when the eye region is
 # much darker than the rest of the face (median gray ratio below this).

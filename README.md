@@ -8,10 +8,13 @@ Two small CNNs (96x96 grayscale input) do the classification:
 | Model | Classes | Input |
 |---|---|---|
 | eye model | Open / Closed | square crop around each eye |
-| face model | no_yawn / yawn | face crop |
+| mouth model | no_yawn / yawn | square crop around the mouth |
 
-MediaPipe Face Landmarker finds the face and eyes. The same crop code
+MediaPipe Face Landmarker finds the face, eyes and lips. The same crop code
 (`common.py`) is used for training and for live prediction.
+
+Yawns are detected from the lip landmarks first (Mouth Aspect Ratio); the
+mouth model is a second check. See "Yawn detection" below.
 
 ## Files
 
@@ -25,6 +28,7 @@ MediaPipe Face Landmarker finds the face and eyes. The same crop code
 | `demo.py` | Real-time demo (webcam or video file) |
 | `scenarios.py` | Runs the test videos in `./scenarios`, writes `results/scenarios.csv` |
 | `test_alerts.py` | Checks the alert rules with made-up signals |
+| `yawn_test.py` | Guided 2-minute webcam test: talking, neutral, 3 yawns; reports false and missed yawns |
 
 ## Setup (Windows, PowerShell)
 
@@ -44,7 +48,7 @@ execution policy).
 ## Run
 
 ```powershell
-# 1. Train both models (about 15 minutes on CPU). Add "eye" or "face" to train one.
+# 1. Train both models (about 15 minutes on CPU). Add "eye" or "mouth" to train one.
 .\.venv\Scripts\python.exe train.py
 
 # 2. Evaluate -> charts and summary.csv in .\results
@@ -61,6 +65,9 @@ execution policy).
 # 5. Scenario tests -> .\results\scenarios.csv
 .\.venv\Scripts\python.exe scenarios.py
 .\.venv\Scripts\python.exe scenarios.py --show
+
+# 6. Guided yawn test on the webcam (about 2 minutes) -> .\results\yawn_test.csv
+.\.venv\Scripts\python.exe yawn_test.py
 ```
 
 To retrain from scratch after changing crop settings, delete the `cache`
@@ -72,6 +79,7 @@ folder first.
 |---|---|
 | `W` | 160-degree mode on/off ("160° MODE" is shown when on) |
 | `M` | Mute on/off ("MUTED" is shown when on) |
+| `C` | Recalibrate the yawn threshold (5 s, mouth closed) |
 | `Q` or `Esc` | Quit |
 
 `--wide` and `--mute` start the demo with those modes already on.
@@ -83,7 +91,7 @@ folder first.
 | Webcam capture | Native resolution: the largest of 1920x1080 / 1280x720 the camera accepts, else its default |
 | Processing resolution | `PROCESS_RES = "svga"`: every frame is resized to 800x600 (4:3) before any detection. This is Aizu's processing resolution on the ESP32-S3 |
 | Optional preset | `PROCESS_RES = "720p"`: 1280x720, the device's ceiling |
-| Model input | Eye and face crops are resized to 96x96 grayscale |
+| Model input | Eye and mouth crops are resized to 96x96 grayscale |
 | 160-degree mode | Frame is downscaled to 400x300 and scaled back to 800x600 before detection, to mimic the low pixel density of the 160-degree lens |
 | Frame rate | Processing is capped at 10 fps; the actual rate is shown on screen |
 | Display window | Freely resizable, kept at the frame's aspect ratio (4:3 for SVGA). Window size does not affect detection |
@@ -92,20 +100,45 @@ folder first.
 A 16:9 camera image is centre-cropped to 4:3 (not squashed) before the resize.
 Video files go through the same resize, so scenario results match the live demo.
 
+## Yawn detection
+
+| Step | What happens |
+|---|---|
+| MAR | Mouth Aspect Ratio = vertical inner-lip opening / mouth width, from the lip landmarks. About 0.01 with the mouth closed; the dataset's yawn photos have a median of 0.71 |
+| Calibration | For the first 5 s the demo shows "CALIBRATING" (keep the mouth closed, normal face) and takes the median MAR as the driver's baseline. Press `C` to redo it |
+| Threshold | baseline + `MAR_YAWN_OFFSET` (0.35), never below 0.30. If the mouth was open during calibration (baseline above 0.20) a default baseline of 0.02 is used instead |
+| Manual threshold | Set `MAR_THRESHOLD_MANUAL` in `config.py` (for example `0.40`) to skip calibration |
+| Mouth CNN | When MAR is above the threshold, the mouth-crop CNN must also say "yawn" (`YAWN_USE_CNN = True`). Set it to `False` to use MAR alone |
+| Yawn offense | Yawn frames continuously for 4 s (one other frame in between is allowed) |
+
+The screen shows the live value as `Mouth: MAR 0.12 / 0.36` (value / threshold),
+plus the CNN score while the mouth is open. No yawns are counted during
+calibration. Every frame's MAR is logged to `events\mar_<start time>.csv`.
+
+On the dataset's mouth test photos (`results\yawn_methods.csv`), MAR alone and
+"MAR and CNN agree" give the same result: no false yawns and 7 of 107 yawn
+photos missed, all with the mouth only partly open (MAR 0.21-0.36). So the CNN neither helps nor
+hurts there. On the live webcam, run `yawn_test.py`: its
+`frames_vetoed_by_cnn` column shows whether the CNN is blocking real yawns.
+If it is, turn it off.
+
 ## Outputs
 
 | Path | Content |
 |---|---|
-| `models\eye_model.keras`, `models\face_model.keras` | Float Keras models |
+| `models\eye_model.keras`, `models\mouth_model.keras` | Float Keras models |
 | `models\*_float.tflite`, `models\*_int8.tflite` | TFLite float32 and INT8 models |
 | `results\summary.csv` | Accuracy, precision, recall, F1, AUC, size, inference time |
 | `results\<model>_confusion_matrix.png` | Confusion matrices (float and INT8) |
 | `results\<model>_roc.png` | ROC curves |
 | `results\<model>_training_curves.png` | Training / validation accuracy and loss |
-| `results\face_dropped.json` | yawn / no_yawn images dropped because no face was found |
+| `results\mouth_dropped.json` | yawn / no_yawn images dropped because no face was found |
+| `results\yawn_methods.csv` | Yawn decision per test photo: MAR alone, mouth CNN alone, both agreeing |
+| `results\yawn_test.csv`, `yawn_test_mar.csv`, `yawn_test_mar.png` | Guided yawn test: false / missed yawns per phase, MAR per frame, MAR plot |
 | `results\scenarios.csv` | Expected vs highest level per scenario video |
 | `events\*.avi` + `*.json` | 10 s clip (5 s before + 5 s after) and log for each event that results in Level 2 or 3 |
 | `events\alerts_<start time>.json` | One log per demo session listing every offense and override: time, level, trigger, reason and offense count |
+| `events\mar_<start time>.csv` | One log per demo session with every frame's MAR, threshold, CNN score and yawn decision |
 
 ## Alert levels (offense count)
 
@@ -177,7 +210,9 @@ processed on the video's own clock, so results do not depend on laptop speed.
   training crops and live crops keeps them consistent.
 - 96x96 grayscale input instead of 145x145 RGB.
 - Current Keras API (`argmax` on the softmax output, no `predict_classes`).
-- The face crop is applied at prediction time too.
+- The yawn model sees a mouth crop instead of the whole face, with the same
+  crop at prediction time. A whole-face yawn model gave false positives on
+  the live webcam.
 - Stratified 70/15/15 split with a fixed seed; the notebook validated on its test set.
 - Augmentation: flip, +/-15 degree rotation, brightness, contrast, gamma,
   slight blur, noise and downscale-then-upscale (low-resolution camera).
@@ -186,7 +221,7 @@ processed on the video's own clock, so results do not depend on laptop speed.
 
 - The yawn / no_yawn photos are frames from a few drivers' videos, and the
   file names do not identify the driver. A random split therefore puts the
-  same people in train and test, so the face model's test scores are
+  same people in train and test, so the mouth model's test scores are
   optimistic. The scenario videos of your own faces are the honest check.
 - The sunglasses check compares eye-region brightness with the face. It
   catches dark lenses; mirrored or lightly tinted lenses can pass as eyes.

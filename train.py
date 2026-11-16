@@ -1,4 +1,4 @@
-"""Train the two binary models (eye: Open/Closed, face: no_yawn/yawn), save
+"""Train the two binary models (eye: Open/Closed, mouth: no_yawn/yawn), save
 them as .keras and convert to float + INT8 TensorFlow Lite.
 
     python train.py            # both models
@@ -20,14 +20,15 @@ from keras import layers
 
 # ------------------------------------------------------------------ data ---
 def build_cache(name):
-    """Read images, crop (faces only), resize to 96x96 gray, cache as .npz."""
+    """Read images, crop (mouth model: mouth only), resize to 96x96 gray,
+    cache as .npz. The mouth cache also keeps each photo's MAR."""
     out = config.CACHE_DIR / f"{name}.npz"
     if out.exists():
         return
     config.CACHE_DIR.mkdir(exist_ok=True)
     config.RESULTS_DIR.mkdir(exist_ok=True)
-    finder = common.FaceFinder(video=False) if name == "face" else None
-    X, y, dropped = [], [], {}
+    finder = common.FaceFinder(video=False) if name == "mouth" else None
+    X, y, mar, dropped = [], [], [], {}
     for label, folder in enumerate(config.MODELS[name]):
         files = sorted((config.DATA_DIR / folder).glob("*"))
         dropped[folder] = {"total": len(files), "dropped": 0}
@@ -38,18 +39,20 @@ def build_cache(name):
                 continue
             if finder is not None:                     # same crop as the demo
                 lm = finder.find(img)
-                box = common.face_box(lm, img.shape) if lm is not None else None
+                box = common.mouth_box(lm, img.shape) if lm is not None else None
                 if box is None:
                     dropped[folder]["dropped"] += 1
                     continue
                 img = common.crop(img, box)
+                mar.append(common.mouth_aspect_ratio(lm))
             X.append(common.preprocess(img))
             y.append(label)
     if finder is not None:
         finder.close()
-    np.savez_compressed(out, X=np.array(X, np.uint8), y=np.array(y, np.int64))
+    extra = {"mar": np.array(mar, np.float32)} if mar else {}
+    np.savez_compressed(out, X=np.array(X, np.uint8), y=np.array(y, np.int64), **extra)
     for folder, d in dropped.items():
-        why = "no face found" if name == "face" else "unreadable"
+        why = "no face found" if name == "mouth" else "unreadable"
         print(f"[{name}] {folder}: {d['total'] - d['dropped']} kept, "
               f"{d['dropped']} dropped ({why}) of {d['total']}")
     (config.RESULTS_DIR / f"{name}_dropped.json").write_text(json.dumps(dropped, indent=2))

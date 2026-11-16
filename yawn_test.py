@@ -1,0 +1,145 @@
+"""Guided yawn-detection test on the webcam (about 2 minutes).
+
+Follow the yellow prompts on screen:
+    1. calibration   6 s   mouth closed, normal face
+    2. talk         30 s   talk normally (count aloud, read something)
+    3. neutral      30 s   mouth closed, look at the camera
+    4. yawn x3      15 s each: one real, wide yawn held for 4 s or more
+
+A yawn is "detected" when the alert logic counts a yawn offense (yawn frames
+for 4 s straight). Reports false yawns (during talk / neutral) and missed
+yawns (yawn slots with no detection).
+
+    python yawn_test.py
+    python yawn_test.py --source my_recording.mp4
+
+Writes results\\yawn_test.csv (per phase), results\\yawn_test_mar.csv (MAR per
+frame) and results\\yawn_test_mar.png (MAR over time).
+"""
+import argparse
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+
+import config as cfg
+import demo
+
+# (name, seconds, prompt, yawns expected)
+PHASES = [
+    ("calibration", cfg.MAR_CALIBRATION_S + 1, "", 0),
+    ("talk", 30, "TALK normally", 0),
+    ("neutral", 30, "NEUTRAL: mouth closed", 0),
+    ("yawn 1", 15, "YAWN 1 of 3: hold 4 s or more", 1),
+    ("yawn 2", 15, "YAWN 2 of 3: hold 4 s or more", 1),
+    ("yawn 3", 15, "YAWN 3 of 3: hold 4 s or more", 1),
+]
+
+
+def phase_at(t):
+    """Returns (index, seconds left in the phase) or (None, 0) after the end."""
+    end = 0.0
+    for i, (_, seconds, _, _) in enumerate(PHASES):
+        end += seconds
+        if t < end:
+            return i, end - t
+    return None, 0.0
+
+
+def longest_run(times, flags):
+    """Longest stretch of True flags in seconds, allowing the same number of
+    non-yawn frames inside a yawn as the alert logic does."""
+    best, start, misses = 0.0, None, 0
+    for t, flag in zip(times, flags):
+        if flag:
+            start = t if start is None else start
+            misses = 0
+            best = max(best, t - start)
+        elif start is not None:
+            misses += 1
+            if misses > cfg.YAWN_FRAME_TOLERANCE:
+                start = None
+    return best
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Guided yawn detection test")
+    ap.add_argument("--source", default="0", help="webcam index or a video of the same routine")
+    ap.add_argument("--no-display", action="store_true")
+    args = ap.parse_args()
+    source = int(args.source) if args.source.isdigit() else args.source
+    total = sum(p[1] for p in PHASES)
+
+    frames = []
+
+    def on_frame(t, det, state):
+        i, left = phase_at(t)
+        frames.append({
+            "time_s": round(t, 2), "phase": PHASES[i][0] if i is not None else "",
+            "mar": det["mar"], "threshold": det["mar_threshold"],
+            "mouth_cnn": det["p_mouth_cnn"], "yawn_frame": det["p_yawn"],
+        })
+        if i is None or not PHASES[i][2]:
+            return ""
+        return f"{PHASES[i][2]}  ({left:.0f} s)"
+
+    summary = demo.run(source, display=not args.no_display, sound=False, record=False,
+                       max_seconds=total, on_frame=on_frame)
+    df = pd.DataFrame(frames)
+    yawn_times = [e["time"] for e in summary["events"] if e["trigger"] == "long_yawn"]
+
+    rows, start = [], 0.0
+    for name, seconds, _, expected in PHASES:
+        end = start + seconds
+        part = df[(df["time_s"] >= start) & (df["time_s"] < end)]
+        found = sum(1 for t in yawn_times if start <= t < end)
+        yawn_flags = (part["yawn_frame"] == 1).tolist()
+        above = part["mar"] >= part["threshold"]
+        rows.append({
+            "phase": name, "start_s": start, "end_s": end,
+            "expected_yawns": expected, "detected_yawns": found,
+            "false_yawns": max(found - expected, 0),
+            "missed_yawns": max(expected - found, 0),
+            "peak_mar": round(part["mar"].max(), 3) if part["mar"].notna().any() else None,
+            "longest_yawn_run_s": round(longest_run(part["time_s"].tolist(), yawn_flags), 1),
+            "frames_above_threshold": int(above.sum()),
+            "frames_vetoed_by_cnn": int((above & (part["yawn_frame"] == 0)
+                                         & part["mouth_cnn"].notna()).sum()),
+        })
+        start = end
+    report = pd.DataFrame(rows)
+
+    cfg.RESULTS_DIR.mkdir(exist_ok=True)
+    report.to_csv(cfg.RESULTS_DIR / "yawn_test.csv", index=False)
+    df.to_csv(cfg.RESULTS_DIR / "yawn_test_mar.csv", index=False)
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(df["time_s"], df["mar"], linewidth=1.2, label="MAR")
+    if summary["mar_threshold"] is not None:
+        ax.axhline(summary["mar_threshold"], color="red", linestyle="--",
+                   label=f"threshold {summary['mar_threshold']:.2f}")
+    for t in yawn_times:
+        ax.axvline(t, color="green", linewidth=2, alpha=0.7)
+    start = 0.0
+    for i, (name, seconds, _, _) in enumerate(PHASES):
+        ax.axvspan(start, start + seconds, color="gray", alpha=0.08 if i % 2 else 0.18)
+        ax.text(start + seconds / 2, ax.get_ylim()[1] * 0.94, name, ha="center", fontsize=9)
+        start += seconds
+    ax.set(xlabel="time (s)", ylabel="MAR", xlim=(0, total),
+           title="Yawn test: MAR over time (green line = yawn counted)")
+    ax.legend(loc="center left")
+    fig.tight_layout()
+    fig.savefig(cfg.RESULTS_DIR / "yawn_test_mar.png", dpi=150)
+
+    pd.set_option("display.width", 220)
+    print("\n" + report.to_string(index=False))
+    print(f"\nThreshold: MAR >= {summary['mar_threshold'] or 0:.3f} ({summary['calibration']}); "
+          f"mouth CNN check: {'on' if cfg.YAWN_USE_CNN else 'off'}")
+    print(f"False yawns (talk + neutral): {int(report['false_yawns'].sum())}")
+    print(f"Missed yawns: {int(report['missed_yawns'].sum())} of "
+          f"{int(report['expected_yawns'].sum())}")
+    if summary["duration_s"] < total - 2:
+        print(f"NOTE: the run stopped at {summary['duration_s']} s of {total:.0f} s, "
+              "so later phases are incomplete.")
+    print(f"Saved yawn_test.csv, yawn_test_mar.csv and yawn_test_mar.png in {cfg.RESULTS_DIR}")
