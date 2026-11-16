@@ -15,6 +15,10 @@ import config
 # Landmark indices (MediaPipe face mesh topology): eye corners.
 RIGHT_EYE_CORNERS = (33, 133)
 LEFT_EYE_CORNERS = (362, 263)
+# Eye Aspect Ratio points per eye: corner, two upper-lid points, other corner,
+# two lower-lid points (p1..p6 of the usual EAR formula).
+RIGHT_EYE_EAR = (33, 160, 158, 133, 153, 144)
+LEFT_EYE_EAR = (362, 385, 387, 263, 373, 380)
 # Lips: inner-lip midpoints, inner mouth corners, and the outer outline
 # (left corner, right corner, top of upper lip, bottom of lower lip).
 INNER_LIP_TOP, INNER_LIP_BOTTOM = 13, 14
@@ -99,6 +103,18 @@ def eye_boxes(landmarks, shape):
         cx, cy = (pa + pb) / 2
         boxes.append(_square_box(cx, cy - side * config.EYE_CROP_SHIFT_UP, side, shape))
     return boxes
+
+
+def eye_aspect_ratio(landmarks):
+    """EAR per eye = mean of two vertical lid distances / horizontal eye width.
+    Returns (right eye, left eye). Larger = more open."""
+    ears = []
+    for p1, p2, p3, p4, p5, p6 in (RIGHT_EYE_EAR, LEFT_EYE_EAR):
+        vertical = (np.linalg.norm(landmarks[p2] - landmarks[p6])
+                    + np.linalg.norm(landmarks[p3] - landmarks[p5]))
+        width = np.linalg.norm(landmarks[p1] - landmarks[p4])
+        ears.append(float(vertical / (2.0 * width + 1e-6)))
+    return tuple(ears)
 
 
 def mouth_aspect_ratio(landmarks):

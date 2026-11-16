@@ -77,12 +77,27 @@ YAWN_CONF_MIN = 0.70               # count "yawn" only if P(yawn) >= this
 OPEN_FRAME_TOLERANCE = 1           # open frames allowed inside a closure
 YAWN_FRAME_TOLERANCE = 1           # non-yawn frames allowed inside a yawn
 
+# Startup calibration (C key repeats it): the driver keeps the eyes open and
+# the mouth closed while the open-eye EAR and closed-mouth MAR are measured.
+CALIBRATION_S = 5.0
+
+# Eye closure. Two signals per frame:
+#   cnn: the eye CNN says Closed with confidence >= CLOSED_CONF_MIN
+#   ear: Eye Aspect Ratio closure % = 1 - EAR / EAR_open, at or above EAR_CLOSURE_MIN
+#        (EAR_open is the driver's own open-eye EAR, so eye shape does not matter)
+# EYE_CLOSED_RULE decides how they combine into "this frame is closed":
+#   "cnn" | "ear" | "either" (cnn OR ear) | "both" (cnn AND ear)
+EYE_CLOSED_RULE = "either"
+EAR_CLOSURE_MIN = 0.80             # "80 % closed"; also the PERCLOS (P80) criterion
+EAR_CLOSED_MANUAL = None           # e.g. 0.08: closed when EAR <= this, instead of the 80 % rule
+EAR_OPEN_DEFAULT = 0.30            # used when calibration is rejected
+EAR_OPEN_MIN = 0.15                # calibration is rejected if the eyes were closed / hidden
+
 # Yawn detection. Primary signal: Mouth Aspect Ratio from the lip landmarks
 # (MAR = inner-lip opening / mouth width). A yawn frame = MAR at or above the
 # threshold. The threshold is set per driver by a short calibration at
 # startup (mouth closed, normal face): threshold = baseline + MAR_YAWN_OFFSET.
 MAR_THRESHOLD_MANUAL = None        # e.g. 0.40 to skip calibration and force a threshold
-MAR_CALIBRATION_S = 5.0            # length of the startup calibration
 MAR_YAWN_OFFSET = 0.35             # threshold = calibrated baseline + this
 MAR_THRESHOLD_MIN = 0.30           # the threshold never goes below this
 MAR_BASELINE_DEFAULT = 0.02        # used when calibration is rejected
@@ -107,7 +122,7 @@ OFFENSE_WINDOW_S = 600.0           # offenses are counted over the last 10 minut
 MICROSLEEP_S = 3.0                 # override: eyes closed this long -> Level 3 at once
 ALARM_OPEN_RELEASE_S = 2.0         # Level-3 alarm stops after eyes open this long
 ALARM_NO_EYES_S = 5.0              # alarm length when the eyes are not visible (sunglasses)
-PERCLOS_WINDOW_S = 60.0            # rolling PERCLOS window (shown on screen only)
+PERCLOS_WINDOW_S = 60.0            # rolling PERCLOS (P80) window, shown on screen only
 
 LEVEL_NAMES = {0: "NORMAL", 1: "CAUTION", 2: "WARNING", 3: "CRITICAL"}
 LEVEL_COLORS_BGR = {0: (60, 170, 60), 1: (0, 215, 255), 2: (0, 140, 255), 3: (0, 0, 230)}

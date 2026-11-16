@@ -77,7 +77,8 @@ class AlertEngine:
         self.last_alert = None                     # (t, trigger) of the latest alert
 
     def perclos(self):
-        """Share of closed frames in the last 60 s (shown on screen only)."""
+        """PERCLOS: share of closed frames in the last 60 s (shown on screen
+        only). The demo feeds it the P80 flag: EAR closure of 80 % or more."""
         if not self.eye_samples:
             return 0.0
         return sum(1 for _, c in self.eye_samples if c) / len(self.eye_samples)
@@ -95,9 +96,11 @@ class AlertEngine:
         self.alarm_timeout = t + cfg.ALARM_NO_EYES_S if self.eyes_unknown else None
 
     # ------------------------------------------------------------- update --
-    def update(self, t, p_closed, p_yawn):
+    def update(self, t, p_closed, p_yawn, perclos_closed=None):
         """t: seconds. p_closed: P(eyes closed) or None if eyes not visible.
-        p_yawn: P(yawn) or None if no face. Returns the current state dict."""
+        p_yawn: P(yawn) or None if no face. perclos_closed: whether this frame
+        counts as closed for PERCLOS (default: the same as the closed decision).
+        Returns the current state dict."""
         new = []                                   # (trigger, is_offense) this frame
 
         # ---- eyes ----
@@ -116,7 +119,7 @@ class AlertEngine:
             closed = p_closed >= cfg.CLOSED_CONF_MIN
             eyes_open_now = not closed
             eye_status = "closed" if closed else "open"
-            self.eye_samples.append((t, closed))
+            self.eye_samples.append((t, closed if perclos_closed is None else bool(perclos_closed)))
             if self.closure.update(t, closed) is not None:
                 self.closure_flags.clear()         # closure ended
             if closed:

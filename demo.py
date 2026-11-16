@@ -6,7 +6,7 @@
     python demo.py --mute --no-record
 
 Keys:  W = 160-degree mode on/off   M = mute on/off
-       C = recalibrate the yawn threshold   Q or Esc = quit
+       C = recalibrate (eyes open, mouth closed)   Q or Esc = quit
 """
 import argparse
 import csv
@@ -24,10 +24,25 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 WINDOW = "Aizu - drowsiness monitor"
 
 
+def eye_closed_by_rule(cnn_closed, ear_closed, rule=None):
+    """Combine the two eye signals. Either may be None (not available yet)."""
+    rule = rule or cfg.EYE_CLOSED_RULE
+    cnn, ear = bool(cnn_closed), bool(ear_closed)
+    if rule == "cnn":
+        return cnn
+    if rule == "ear":
+        return ear
+    if rule == "both":
+        return cnn and ear
+    return cnn or ear                                   # "either"
+
+
 class Pipeline:
-    """frame -> face landmarks -> eye crops -> eye model (eyes closed?)
-                               -> lip landmarks -> MAR, optionally confirmed by
-                                  the mouth-crop CNN (yawning?)."""
+    """frame -> face landmarks
+         -> eyes:  eye CNN on each eye crop + Eye Aspect Ratio (EAR) closure %
+         -> mouth: Mouth Aspect Ratio (MAR), optionally confirmed by the mouth CNN.
+    A 5 s calibration at startup measures the driver's open-eye EAR and
+    closed-mouth MAR."""
 
     def __init__(self, variant=None):
         variant = variant or cfg.MODEL_VARIANT
@@ -35,42 +50,62 @@ class Pipeline:
         self.eye_model = common.TFLiteModel(common.model_path("eye", variant))
         self.mouth_model = (common.TFLiteModel(common.model_path("mouth", variant))
                             if cfg.YAWN_USE_CNN else None)
-        self.mar_threshold = cfg.MAR_THRESHOLD_MANUAL     # None until calibrated
-        self.mar_baseline = None
-        self.calibration_note = "manual" if self.mar_threshold is not None else ""
-        self._calib_start, self._calib = None, []
+        self.recalibrate()
 
     def recalibrate(self):
-        """Start the 5 s MAR calibration again (C key)."""
-        self.mar_threshold, self.mar_baseline = None, None
-        self._calib_start, self._calib = None, []
+        """Start the 5 s calibration again (C key)."""
+        self.calibrated = False
+        self.mar_threshold = cfg.MAR_THRESHOLD_MANUAL     # None until calibrated
+        self.mar_baseline = None
+        self.ear_open = None                              # driver's open-eye EAR
+        self.calibration_note = ""
+        self._calib_start, self._calib_mar, self._calib_ear = None, [], []
 
-    def _calibrate(self, mar, t):
-        """Collect closed-mouth MAR for a few seconds, then set the threshold.
-        Returns the seconds of calibration left."""
+    def _calibrate(self, mar, ear, t):
+        """Collect closed-mouth MAR and open-eye EAR for a few seconds, then
+        set the driver's baselines. Returns the seconds of calibration left."""
         if self._calib_start is None:
             self._calib_start = t
-        self._calib.append(mar)
-        left = cfg.MAR_CALIBRATION_S - (t - self._calib_start)
+        self._calib_mar.append(mar)
+        if ear is not None:
+            self._calib_ear.append(ear)
+        left = cfg.CALIBRATION_S - (t - self._calib_start)
         if left > 0:
             return left
-        baseline = float(np.median(self._calib))
-        if baseline > cfg.MAR_BASELINE_MAX:   # mouth was open: do not trust it
-            baseline, self.calibration_note = cfg.MAR_BASELINE_DEFAULT, "default (mouth was open)"
-        else:
-            self.calibration_note = "calibrated"
+        notes = []
+        # eyes: median EAR with the eyes open
+        ear_open = float(np.median(self._calib_ear)) if self._calib_ear else 0.0
+        if ear_open < cfg.EAR_OPEN_MIN:        # eyes were closed or hidden: do not trust it
+            ear_open = cfg.EAR_OPEN_DEFAULT
+            notes.append("eyes: default")
+        self.ear_open = ear_open
+        # mouth: median MAR with the mouth closed
+        baseline = float(np.median(self._calib_mar))
+        if baseline > cfg.MAR_BASELINE_MAX:    # mouth was open: do not trust it
+            baseline = cfg.MAR_BASELINE_DEFAULT
+            notes.append("mouth: default")
         self.mar_baseline = baseline
-        self.mar_threshold = max(baseline + cfg.MAR_YAWN_OFFSET, cfg.MAR_THRESHOLD_MIN)
+        if cfg.MAR_THRESHOLD_MANUAL is None:
+            self.mar_threshold = max(baseline + cfg.MAR_YAWN_OFFSET, cfg.MAR_THRESHOLD_MIN)
+        else:
+            notes.append("mouth: manual")
+        self.calibration_note = "calibrated" + (f" ({', '.join(notes)})" if notes else "")
+        self.calibrated = True
         return 0.0
 
     def process(self, frame, t):
-        """Returns p_closed / p_yawn (None when not measurable), MAR and boxes.
-        p_yawn is 1.0 / 0.0: the yawn decision for this frame."""
-        out = {"face_box": None, "eye_boxes": [], "eye_probs": [], "mouth_box": None,
-               "p_closed": None,
-               "p_yawn": None, "mar": None, "mar_threshold": self.mar_threshold,
-               "p_mouth_cnn": None, "calibrating": None, "face_found": False,
-               "occluded": False}
+        """One frame -> everything the alert logic and the GUI need.
+        p_closed / p_yawn are the final decisions as 1.0 / 0.0 (None when not
+        measurable); the raw signals are returned next to them."""
+        out = {"face_found": False, "face_box": None, "calibrating": None,
+               # eyes
+               "eye_boxes": [], "eye_closures": [], "occluded": False,
+               "ear": None, "ear_open": self.ear_open, "closure": None,
+               "p_eye_cnn": None, "cnn_closed": None, "ear_closed": None,
+               "p80": None, "p_closed": None,
+               # mouth
+               "mouth_box": None, "mar": None, "mar_threshold": self.mar_threshold,
+               "p_mouth_cnn": None, "p_yawn": None}
         landmarks = self.finder.find(frame, t)
         if landmarks is None:
             return out
@@ -78,12 +113,40 @@ class Pipeline:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         out["face_box"] = common.face_box(landmarks, frame.shape)
 
-        # ---- yawn: MAR first, mouth CNN must agree if it is enabled ----
+        # ---- raw signals ----
+        boxes = common.eye_boxes(landmarks, frame.shape)
+        out["eye_boxes"] = [b for b in boxes if b is not None]
+        out["occluded"] = common.eyes_look_occluded(gray, landmarks, boxes)
+        ears = None if out["occluded"] else common.eye_aspect_ratio(landmarks)
+        if ears is not None:
+            out["ear"] = float(np.mean(ears))            # average of both eyes
         mar = out["mar"] = common.mouth_aspect_ratio(landmarks)
         out["mouth_box"] = common.mouth_box(landmarks, frame.shape)
-        if self.mar_threshold is None:
-            out["calibrating"] = self._calibrate(mar, t)
-            out["mar_threshold"] = self.mar_threshold
+
+        if not self.calibrated:
+            out["calibrating"] = self._calibrate(mar, out["ear"], t)
+            out["mar_threshold"], out["ear_open"] = self.mar_threshold, self.ear_open
+
+        # ---- eyes: CNN says Closed, and/or EAR closure >= 80 % ----
+        if ears is not None:
+            probs = [self.eye_model.predict(common.preprocess(common.crop(gray, b)))[1]
+                     for b in boxes]
+            out["p_eye_cnn"] = float(np.min(probs))      # both eyes must look closed
+            out["cnn_closed"] = out["p_eye_cnn"] >= cfg.CLOSED_CONF_MIN
+            if self.ear_open is not None:
+                # closure % = 1 - EAR / EAR_open  (0 = fully open, 1 = fully closed)
+                out["eye_closures"] = [float(np.clip(1 - e / self.ear_open, 0, 1)) for e in ears]
+                out["closure"] = float(np.clip(1 - out["ear"] / self.ear_open, 0, 1))
+                if cfg.EAR_CLOSED_MANUAL is not None:
+                    out["ear_closed"] = out["ear"] <= cfg.EAR_CLOSED_MANUAL
+                else:
+                    out["ear_closed"] = out["closure"] >= cfg.EAR_CLOSURE_MIN
+                out["p80"] = out["ear_closed"]           # frame counted by PERCLOS (P80)
+            closed = eye_closed_by_rule(out["cnn_closed"], out["ear_closed"])
+            out["p_closed"] = 1.0 if closed else 0.0
+
+        # ---- yawn: MAR first, mouth CNN must agree if it is enabled ----
+        if not self.calibrated or self.mar_threshold is None:
             out["p_yawn"] = 0.0               # no yawns are counted while calibrating
         else:
             yawning = mar >= self.mar_threshold
@@ -92,17 +155,6 @@ class Pipeline:
                 out["p_mouth_cnn"] = float(self.mouth_model.predict(mouth)[1])
                 yawning = out["p_mouth_cnn"] >= cfg.YAWN_CNN_MIN
             out["p_yawn"] = 1.0 if yawning else 0.0
-
-        boxes = common.eye_boxes(landmarks, frame.shape)
-        out["eye_boxes"] = [b for b in boxes if b is not None]
-        out["occluded"] = common.eyes_look_occluded(gray, landmarks, boxes)
-        if not out["occluded"]:
-            probs = [self.eye_model.predict(common.preprocess(common.crop(gray, b)))[1]
-                     for b in boxes]
-            out["eye_probs"] = [float(p) for p in probs]
-            out["p_closed"] = float(np.min(probs))       # both eyes must look closed
-        else:
-            out["eye_probs"] = [None] * len(out["eye_boxes"])
         return out
 
     def close(self):
@@ -215,13 +267,14 @@ def draw_camera(frame, det, state, note=""):
 
     if det["face_box"]:
         _labeled_box(img, det["face_box"], "face", BOX_FACE, 0.55)
-    for box, p in zip(det["eye_boxes"], det["eye_probs"]):
-        if p is None:
+    for i, box in enumerate(det["eye_boxes"]):
+        if det["p_closed"] is None:              # hidden (sunglasses) / not classified
             _labeled_box(img, box, "eye ?", BOX_UNKNOWN)
-        elif p >= cfg.CLOSED_CONF_MIN:
-            _labeled_box(img, box, f"closed {p:.2f}", BOX_BAD)
-        else:
-            _labeled_box(img, box, f"open {1 - p:.2f}", BOX_OK)
+            continue
+        name, color = ("closed", BOX_BAD) if det["p_closed"] else ("open", BOX_OK)
+        if i < len(det["eye_closures"]):         # this eye's closure %, once calibrated
+            name += f" {det['eye_closures'][i] * 100:.0f}%"
+        _labeled_box(img, box, name, color)
     if det["mouth_box"]:
         if det["mar_threshold"] is None:
             _labeled_box(img, det["mouth_box"], f"mouth {det['mar']:.2f}", BOX_UNKNOWN)
@@ -233,7 +286,7 @@ def draw_camera(frame, det, state, note=""):
     if note:
         _outlined(img, note, (14, h - 56), 0.9, (0, 255, 255))
     if det["calibrating"]:
-        _outlined(img, f"CALIBRATING {det['calibrating']:.0f} s - mouth closed, normal face",
+        _outlined(img, f"CALIBRATING {det['calibrating']:.0f} s - eyes open, mouth closed",
                   (14, h - 20), 0.75, (0, 255, 255))
     if state["alarm"] and int(state["t"] * 4) % 2 == 0:       # flashing border
         cv2.rectangle(img, (0, 0), (w - 1, h - 1), (0, 0, 255), 12)
@@ -260,12 +313,12 @@ def draw_panel(height, det, state, fps, wide=False, muted=False):
 
     # ---- alert level card ----
     color = cfg.LEVEL_COLORS_BGR[state["level"]]
-    cv2.rectangle(img, (0, 0), (pw, 112), color, -1)
-    _put(img, f"LEVEL {state['level']}", (pad, 34), 0.7, (0, 0, 0), 2)
-    _put(img, cfg.LEVEL_NAMES[state["level"]], (pad, 68), 0.95, (0, 0, 0), 2)
-    for i, line in enumerate(_wrap(state["text"], 0.5, 1, pw - 2 * pad)[:2]):
-        _put(img, line, (pad, 90 + 18 * i), 0.5, (0, 0, 0), 1)
-    y = 112
+    cv2.rectangle(img, (0, 0), (pw, 100), color, -1)
+    _put(img, f"LEVEL {state['level']}", (pad, 26), 0.6, (0, 0, 0), 2)
+    _put(img, cfg.LEVEL_NAMES[state["level"]], (pad, 56), 0.9, (0, 0, 0), 2)
+    for i, line in enumerate(_wrap(state["text"], 0.47, 1, pw - 2 * pad)[:2]):
+        _put(img, line, (pad, 76 + 16 * i), 0.47, (0, 0, 0), 1)
+    y = 100
 
     def section(title):
         nonlocal y
@@ -290,10 +343,15 @@ def draw_panel(height, det, state, fps, wide=False, muted=False):
     # ---- driver ----
     section("DRIVER")
     if det["p_closed"] is not None:
-        p = det["p_closed"]
-        closed = p >= cfg.CLOSED_CONF_MIN
-        row("Eyes", f"{'Closed' if closed else 'Open'}  {max(p, 1 - p):.2f}",
-            red if closed else green)
+        row("Eyes", "CLOSED" if det["p_closed"] else "Open", red if det["p_closed"] else green)
+        if det["closure"] is not None:           # live closure % from EAR
+            row("Closure", f"{det['closure'] * 100:.0f}%  (EAR {det['ear']:.2f} / "
+                           f"{det['ear_open']:.2f})", red if det["ear_closed"] else TEXT_MAIN)
+        else:
+            row("Closure", f"calibrating  (EAR {det['ear']:.2f})", yellow)
+        p = det["p_eye_cnn"]
+        row("Eye CNN", f"{'closed' if det['cnn_closed'] else 'open'} "
+                       f"{max(p, 1 - p):.2f}", red if det["cnn_closed"] else TEXT_MAIN)
     elif state["eyes_unknown"]:
         row("Eyes", cfg.EYES_NOT_VISIBLE_TEXT, yellow)
     else:
@@ -308,7 +366,7 @@ def draw_panel(height, det, state, fps, wide=False, muted=False):
         row("MAR", f"{det['mar']:.2f}  (yawn >= {det['mar_threshold']:.2f})")
         if det["p_mouth_cnn"] is not None:
             row("Mouth CNN", f"{det['p_mouth_cnn']:.2f}")
-    row("PERCLOS 60 s", f"{state['perclos'] * 100:.1f}%")
+    row("PERCLOS P80", f"{state['perclos'] * 100:.1f}%  (last {cfg.PERCLOS_WINDOW_S:g} s)")
 
     # ---- offenses ----
     section(f"OFFENSES  (last {cfg.OFFENSE_WINDOW_S / 60:g} min)")
@@ -332,8 +390,7 @@ def draw_panel(height, det, state, fps, wide=False, muted=False):
     row("Sound", "MUTED" if muted else "on", yellow if muted else TEXT_DIM)
 
     # ---- keys ----
-    _put(img, "W 160 mode   M mute", (pad, height - 34), 0.48, TEXT_DIM)
-    _put(img, "C calibrate   Q quit", (pad, height - 14), 0.48, TEXT_DIM)
+    _put(img, "W 160   M mute   C calibrate   Q quit", (pad, height - 12), 0.46, TEXT_DIM)
     cv2.line(img, (0, 0), (0, height), PANEL_LINE, 1)
     return img
 
@@ -351,23 +408,29 @@ def _keep_aspect(view_w, view_h):
 
 
 # ------------------------------------------------------------------- main ---
-class MarLog:
-    """Per-frame MAR log: events/mar_<start>.csv."""
+class FrameLog:
+    """Per-frame signal log: events/frames_<start>.csv (EAR, closure %, eye CNN
+    score, MAR and the decisions made from them)."""
 
     def __init__(self, out_dir=None):
         out_dir = out_dir or cfg.EVENTS_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
-        self.path = out_dir / f"mar_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        self.path = out_dir / f"frames_{datetime.now():%Y%m%d_%H%M%S}.csv"
         self._file = open(self.path, "w", newline="")
         self._csv = csv.writer(self._file)
-        self._csv.writerow(["time_s", "mar", "threshold", "mouth_cnn", "yawn_frame",
-                            "calibrating"])
+        self._csv.writerow(["time_s", "ear", "ear_open", "closure", "eye_cnn", "cnn_closed",
+                            "ear_closed", "eye_closed", "perclos_p80", "mar", "mar_threshold",
+                            "mouth_cnn", "yawn_frame", "calibrating"])
 
-    def add(self, t, det):
+    def add(self, t, det, state):
         fmt = lambda v: "" if v is None else f"{v:.4f}"
-        self._csv.writerow([f"{t:.2f}", fmt(det["mar"]), fmt(det["mar_threshold"]),
-                            fmt(det["p_mouth_cnn"]),
-                            "" if det["p_yawn"] is None else int(det["p_yawn"]),
+        flag = lambda v: "" if v is None else int(bool(v))
+        self._csv.writerow([f"{t:.2f}", fmt(det["ear"]), fmt(det["ear_open"]),
+                            fmt(det["closure"]), fmt(det["p_eye_cnn"]),
+                            flag(det["cnn_closed"]), flag(det["ear_closed"]),
+                            flag(det["p_closed"]), fmt(state["perclos"]),
+                            fmt(det["mar"]), fmt(det["mar_threshold"]),
+                            fmt(det["p_mouth_cnn"]), flag(det["p_yawn"]),
                             int(bool(det["calibrating"]))])
 
     def close(self):
@@ -408,7 +471,7 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
                                   else "not available, text only"))
     recorder = EventRecorder(events_dir, source=str(source)) if record else None
     alert_log = AlertLog(events_dir, source=str(source)) if record else None
-    mar_log = MarLog(events_dir) if record else None
+    frame_log = FrameLog(events_dir) if record else None
     announced = False
     if display:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
@@ -432,7 +495,7 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
             if wide:
                 frame = lens160(frame)
             det = pipeline.process(frame, t)
-            state = engine.update(t, det["p_closed"], det["p_yawn"])
+            state = engine.update(t, det["p_closed"], det["p_yawn"], det["p80"])
             processed += 1
 
             now = time.monotonic()
@@ -441,14 +504,15 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
                 fps = inst if fps == 0 else 0.9 * fps + 0.1 * inst
             last_wall = now
 
-            if mar_log:
-                mar_log.add(t, det)
-            if verbose and not announced and pipeline.mar_threshold is not None:
+            if frame_log:
+                frame_log.add(t, det, state)
+            if verbose and not announced and pipeline.calibrated:
                 announced = True
-                base = ("" if pipeline.mar_baseline is None
-                        else f", baseline {pipeline.mar_baseline:.3f}")
-                print(f"Yawn threshold: MAR >= {pipeline.mar_threshold:.3f} "
-                      f"({pipeline.calibration_note}{base})")
+                print(f"Calibration: {pipeline.calibration_note}. "
+                      f"Open-eye EAR {pipeline.ear_open:.3f}; "
+                      f"yawn when MAR >= {pipeline.mar_threshold:.3f} "
+                      f"(closed-mouth MAR {pipeline.mar_baseline:.3f}). "
+                      f"Eye rule: {cfg.EYE_CLOSED_RULE}")
             note = on_frame(t, det, state) if on_frame else ""
             camera = draw_camera(frame, det, state, note or "")      # boxes + labels
             if display:                                              # camera | details
@@ -481,7 +545,7 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
                     wide = not wide
                 if key in (ord("m"), ord("M")):
                     player.muted = not player.muted
-                if key in (ord("c"), ord("C")) and cfg.MAR_THRESHOLD_MANUAL is None:
+                if key in (ord("c"), ord("C")):
                     pipeline.recalibrate()
                     announced = False
                 if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
@@ -493,8 +557,8 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
         player.close()
         if recorder:
             recorder.close()
-        if mar_log:
-            mar_log.close()
+        if frame_log:
+            frame_log.close()
         pipeline.close()
         if display:
             cv2.destroyAllWindows()
@@ -504,8 +568,9 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
         "native_resolution": native,
         "mar_threshold": pipeline.mar_threshold,
         "mar_baseline": pipeline.mar_baseline,
+        "ear_open": pipeline.ear_open,
         "calibration": pipeline.calibration_note,
-        "mar_log": str(mar_log.path) if mar_log else None,
+        "frame_log": str(frame_log.path) if frame_log else None,
         "max_level": engine.max_level,
         "time_to_max_s": round(engine.max_level_time, 2) if engine.max_level else None,
         "events": all_events,
