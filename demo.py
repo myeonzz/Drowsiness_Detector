@@ -66,7 +66,8 @@ class Pipeline:
     def process(self, frame, t):
         """Returns p_closed / p_yawn (None when not measurable), MAR and boxes.
         p_yawn is 1.0 / 0.0: the yawn decision for this frame."""
-        out = {"face_box": None, "eye_boxes": [], "mouth_box": None, "p_closed": None,
+        out = {"face_box": None, "eye_boxes": [], "eye_probs": [], "mouth_box": None,
+               "p_closed": None,
                "p_yawn": None, "mar": None, "mar_threshold": self.mar_threshold,
                "p_mouth_cnn": None, "calibrating": None, "face_found": False,
                "occluded": False}
@@ -98,7 +99,10 @@ class Pipeline:
         if not out["occluded"]:
             probs = [self.eye_model.predict(common.preprocess(common.crop(gray, b)))[1]
                      for b in boxes]
+            out["eye_probs"] = [float(p) for p in probs]
             out["p_closed"] = float(np.min(probs))       # both eyes must look closed
+        else:
+            out["eye_probs"] = [None] * len(out["eye_boxes"])
         return out
 
     def close(self):
@@ -163,108 +167,185 @@ def open_camera(index):
     return cap, ((frame.shape[1], frame.shape[0]) if ok else None)
 
 
-# ---------------------------------------------------------------- overlay ---
-def _text(img, text, org, scale=0.6, color=(255, 255, 255), thick=1):
-    # Black outline from shifted copies at the same thickness. (A thicker
-    # stroke changes the letter spacing in OpenCV 5, which shows as ghosting.)
+# ------------------------------------------------------------------- GUI ---
+# The window is the camera view (boxes with labels only) plus a details panel
+# on its right, outside the picture.
+PANEL_BG = (32, 28, 26)
+PANEL_LINE = (70, 64, 60)
+TEXT_MAIN = (240, 240, 240)
+TEXT_DIM = (160, 160, 160)
+BOX_FACE = (255, 0, 255)                       # magenta
+BOX_OK = (0, 220, 0)                           # green: eye open / mouth normal
+BOX_BAD = (0, 0, 255)                          # red: eye closed / yawning
+BOX_UNKNOWN = (170, 170, 170)                  # gray: not classified
+
+
+def _put(img, text, org, scale=0.55, color=TEXT_MAIN, thick=1):
+    cv2.putText(img, text, org, FONT, scale, color, thick, cv2.LINE_AA)
+
+
+def _outlined(img, text, org, scale, color, thick=2):
+    """Text readable on top of the video: black copies shifted by 1 px behind
+    it. (A thicker stroke changes letter spacing in OpenCV 5.)"""
     x, y = org
     for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
         cv2.putText(img, text, (x + dx, y + dy), FONT, scale, (0, 0, 0), thick, cv2.LINE_AA)
     cv2.putText(img, text, org, FONT, scale, color, thick, cv2.LINE_AA)
 
 
-def _text_right(img, text, y, scale=0.7, color=(255, 255, 255), thick=2):
-    (tw, _), _ = cv2.getTextSize(text, FONT, scale, thick)
-    x = img.shape[1] - tw - 12
-    _text(img, text, (x, y), scale, color, thick)
-    return x, tw
+def _labeled_box(img, box, label, color, scale=0.5):
+    """Rectangle with a filled name tag on top, like an object detector."""
+    x0, y0, x1, y1 = box
+    cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)
+    (tw, th), base = cv2.getTextSize(label, FONT, scale, 1)
+    tag_h = th + base + 6
+    ty = y0 - tag_h if y0 - tag_h >= 0 else y1          # under the box at the top edge
+    tx = max(0, min(x0 - 1, img.shape[1] - tw - 8))
+    cv2.rectangle(img, (tx, ty), (tx + tw + 8, ty + tag_h), color, -1)
+    dark = sum(color) > 380                              # dark text on light tags
+    cv2.putText(img, label, (tx + 4, ty + th + 3), FONT, scale,
+                (0, 0, 0) if dark else (255, 255, 255), 1, cv2.LINE_AA)
 
 
-def draw_overlay(frame, det, state, fps, wide=False, muted=False, note=""):
+def draw_camera(frame, det, state, note=""):
+    """Camera view: only the tracked boxes with their labels, plus the
+    messages that need the driver's attention (calibration, test prompts)."""
     img = frame.copy()
     h, w = img.shape[:2]
-    color = cfg.LEVEL_COLORS_BGR[state["level"]]
 
     if det["face_box"]:
-        x0, y0, x1, y1 = det["face_box"]
-        cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)
-    for x0, y0, x1, y1 in det["eye_boxes"] + ([det["mouth_box"]] if det["mouth_box"] else []):
-        cv2.rectangle(img, (x0, y0), (x1, y1), (255, 255, 255), 1)
+        _labeled_box(img, det["face_box"], "face", BOX_FACE, 0.55)
+    for box, p in zip(det["eye_boxes"], det["eye_probs"]):
+        if p is None:
+            _labeled_box(img, box, "eye ?", BOX_UNKNOWN)
+        elif p >= cfg.CLOSED_CONF_MIN:
+            _labeled_box(img, box, f"closed {p:.2f}", BOX_BAD)
+        else:
+            _labeled_box(img, box, f"open {1 - p:.2f}", BOX_OK)
+    if det["mouth_box"]:
+        if det["mar_threshold"] is None:
+            _labeled_box(img, det["mouth_box"], f"mouth {det['mar']:.2f}", BOX_UNKNOWN)
+        elif det["p_yawn"]:
+            _labeled_box(img, det["mouth_box"], f"yawn {det['mar']:.2f}", BOX_BAD)
+        else:
+            _labeled_box(img, det["mouth_box"], f"mouth {det['mar']:.2f}", BOX_OK)
 
-    # colored banner with the current level and its message
-    cv2.rectangle(img, (0, 0), (w, 66), color, -1)
-    cv2.putText(img, f"LEVEL {state['level']}  {cfg.LEVEL_NAMES[state['level']]}", (12, 28),
-                FONT, 0.85, (0, 0, 0), 2, cv2.LINE_AA)
-    cv2.putText(img, state["text"], (12, 56), FONT, 0.7, (0, 0, 0), 2, cv2.LINE_AA)
-
-    if det["p_closed"] is not None:
-        p = det["p_closed"]
-        eye_line = f"Eyes: {'Closed' if p >= 0.5 else 'Open'} {max(p, 1 - p):.2f}"
-    elif state["eyes_unknown"]:
-        eye_line = f"Eyes: unknown - {cfg.EYES_NOT_VISIBLE_TEXT}"
-    else:
-        eye_line = "Eyes: --"
-    if det["mar"] is None:
-        face_line = "Face: not found"
-    elif det["mar_threshold"] is None:
-        face_line = f"Mouth: MAR {det['mar']:.2f} (calibrating)"
-    else:
-        face_line = (f"Mouth: MAR {det['mar']:.2f} / {det['mar_threshold']:.2f}  "
-                     f"{'YAWN' if det['p_yawn'] else 'no yawn'}")
-        if det["p_mouth_cnn"] is not None:
-            face_line += f"  CNN {det['p_mouth_cnn']:.2f}"
-    perclos = f"PERCLOS (60 s): {state['perclos'] * 100:.1f}%"
-    window_min = cfg.OFFENSE_WINDOW_S / 60
-    offenses = f"Offenses ({window_min:g} min): {state['offense_count']}"
-    left = state["window_remaining_s"]
-    if left is None:
-        timer = "Window timer: --"
-    else:                                    # time until the oldest offense leaves
-        timer = f"Window timer: {int(left) // 60}:{int(left) % 60:02d} to next drop"
-    lines = [eye_line, face_line, perclos, offenses]
-    kinds = state["offense_kinds"]
-    for i, kind in enumerate(kinds[-4:], start=max(len(kinds) - 4, 0) + 1):
-        lines.append(f"   {i}. {kind}")          # what kind each offense was
-    if state["override"]:                        # why it is Level 3 below 3 offenses
-        lines.append(f"   + Override: eyes closed {cfg.MICROSLEEP_S:g} s")
-    if state["last_alert"]:
-        label, ago = state["last_alert"]
-        lines.append(f"Last: {label}, {int(ago) // 60}:{int(ago) % 60:02d} ago")
-    lines += [timer, f"FPS: {fps:.1f}"]
-    for i, line in enumerate(lines):
-        _text(img, line, (12, 92 + 24 * i))
-
-    y = 96
-    if wide:                                 # "160° MODE" (font has no degree sign)
-        x, _ = _text_right(img, "160  MODE", y, color=(255, 255, 0))
-        (tw, th), _ = cv2.getTextSize("160", FONT, 0.7, 2)
-        cv2.circle(img, (x + tw + 7, y - th + 3), 4, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.circle(img, (x + tw + 7, y - th + 3), 4, (255, 255, 0), 2, cv2.LINE_AA)
-        y += 30
-    if muted:
-        _text_right(img, "MUTED", y, color=(200, 200, 200))
-
-    if det["calibrating"]:
-        _text(img, f"CALIBRATING {det['calibrating']:.0f} s - mouth closed, normal face",
-              (12, h - 48), 0.8, (0, 255, 255), 2)
     if note:
-        _text(img, note, (12, h - 84), 1.0, (0, 255, 255), 2)
-    _text(img, "W: 160 mode   M: mute   C: calibrate   Q: quit", (w - 398, h - 12), 0.5)
-    if state["eyes_unknown"]:
-        _text(img, cfg.EYES_NOT_VISIBLE_TEXT, (12, h - 16), 0.9, (0, 215, 255), 2)
+        _outlined(img, note, (14, h - 56), 0.9, (0, 255, 255))
+    if det["calibrating"]:
+        _outlined(img, f"CALIBRATING {det['calibrating']:.0f} s - mouth closed, normal face",
+                  (14, h - 20), 0.75, (0, 255, 255))
     if state["alarm"] and int(state["t"] * 4) % 2 == 0:       # flashing border
         cv2.rectangle(img, (0, 0), (w - 1, h - 1), (0, 0, 255), 12)
     return img
 
 
-def _keep_aspect(frame_w, frame_h):
-    """The window may be resized freely; snap its height back to the frame's
-    aspect ratio (4:3 for SVGA). Display size never affects detection."""
+def _wrap(text, scale, thick, max_w):
+    lines, line = [], ""
+    for word in text.split():
+        trial = f"{line} {word}".strip()
+        if line and cv2.getTextSize(trial, FONT, scale, thick)[0][0] > max_w:
+            lines.append(line)
+            line = word
+        else:
+            line = trial
+    return lines + [line] if line else lines
+
+
+def draw_panel(height, det, state, fps, wide=False, muted=False):
+    """Details panel shown beside the camera view."""
+    pw = cfg.PANEL_WIDTH
+    img = np.full((height, pw, 3), PANEL_BG, np.uint8)
+    pad, y = 16, 0
+
+    # ---- alert level card ----
+    color = cfg.LEVEL_COLORS_BGR[state["level"]]
+    cv2.rectangle(img, (0, 0), (pw, 112), color, -1)
+    _put(img, f"LEVEL {state['level']}", (pad, 34), 0.7, (0, 0, 0), 2)
+    _put(img, cfg.LEVEL_NAMES[state["level"]], (pad, 68), 0.95, (0, 0, 0), 2)
+    for i, line in enumerate(_wrap(state["text"], 0.5, 1, pw - 2 * pad)[:2]):
+        _put(img, line, (pad, 90 + 18 * i), 0.5, (0, 0, 0), 1)
+    y = 112
+
+    def section(title):
+        nonlocal y
+        y += 26
+        _put(img, title, (pad, y), 0.5, TEXT_DIM, 1)
+        cv2.line(img, (pad, y + 8), (pw - pad, y + 8), PANEL_LINE, 1)
+        y += 8
+
+    def row(label, value, value_color=TEXT_MAIN):
+        nonlocal y
+        y += 22
+        _put(img, label, (pad, y), 0.52, TEXT_DIM)
+        _put(img, value, (pad + 118, y), 0.52, value_color)
+
+    def line(text, color=TEXT_MAIN):
+        nonlocal y
+        y += 20
+        _put(img, text, (pad + 8, y), 0.5, color)
+
+    red, green, yellow = (90, 90, 255), (110, 220, 110), (0, 215, 255)
+
+    # ---- driver ----
+    section("DRIVER")
+    if det["p_closed"] is not None:
+        p = det["p_closed"]
+        closed = p >= cfg.CLOSED_CONF_MIN
+        row("Eyes", f"{'Closed' if closed else 'Open'}  {max(p, 1 - p):.2f}",
+            red if closed else green)
+    elif state["eyes_unknown"]:
+        row("Eyes", cfg.EYES_NOT_VISIBLE_TEXT, yellow)
+    else:
+        row("Eyes", "--")
+    if det["mar"] is None:
+        row("Mouth", "Face not found", yellow)
+    elif det["mar_threshold"] is None:
+        row("Mouth", "Calibrating...", yellow)
+        row("MAR", f"{det['mar']:.2f}")
+    else:
+        row("Mouth", "YAWN" if det["p_yawn"] else "Normal", red if det["p_yawn"] else green)
+        row("MAR", f"{det['mar']:.2f}  (yawn >= {det['mar_threshold']:.2f})")
+        if det["p_mouth_cnn"] is not None:
+            row("Mouth CNN", f"{det['p_mouth_cnn']:.2f}")
+    row("PERCLOS 60 s", f"{state['perclos'] * 100:.1f}%")
+
+    # ---- offenses ----
+    section(f"OFFENSES  (last {cfg.OFFENSE_WINDOW_S / 60:g} min)")
+    row("Count", str(state["offense_count"]))
+    kinds = state["offense_kinds"]
+    for i, kind in enumerate(kinds[-3:], start=max(len(kinds) - 3, 0) + 1):
+        line(f"{i}. {kind}")                     # what kind each offense was
+    if state["override"]:                        # why it is Level 3 below 3 offenses
+        line(f"+ Override: eyes closed {cfg.MICROSLEEP_S:g} s", red)
+    if state["last_alert"]:
+        label, ago = state["last_alert"]
+        row("Last", f"{label}, {int(ago) // 60}:{int(ago) % 60:02d} ago")
+    left = state["window_remaining_s"]
+    row("Next drop in", "--" if left is None else f"{int(left) // 60}:{int(left) % 60:02d}")
+
+    # ---- system ----
+    section("SYSTEM")
+    row("FPS", f"{fps:.1f}")
+    row("160 deg mode", "ON" if wide else "off",
+        yellow if wide else TEXT_DIM)
+    row("Sound", "MUTED" if muted else "on", yellow if muted else TEXT_DIM)
+
+    # ---- keys ----
+    _put(img, "W 160 mode   M mute", (pad, height - 34), 0.48, TEXT_DIM)
+    _put(img, "C calibrate   Q quit", (pad, height - 14), 0.48, TEXT_DIM)
+    cv2.line(img, (0, 0), (0, height), PANEL_LINE, 1)
+    return img
+
+
+def _keep_aspect(view_w, view_h):
+    """The window may be resized freely; snap its height back to the view's
+    aspect ratio (4:3 camera + panel). Display size never affects detection."""
     try:
         _, _, w, h = cv2.getWindowImageRect(WINDOW)
     except cv2.error:
         return
-    want = int(round(w * frame_h / frame_w))
+    want = int(round(w * view_h / view_w))
     if w > 0 and abs(h - want) > 2:
         cv2.resizeWindow(WINDOW, w, want)
 
@@ -331,7 +412,7 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
     announced = False
     if display:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-        cv2.resizeWindow(WINDOW, *cfg.FRAME_SIZE)
+        cv2.resizeWindow(WINDOW, cfg.FRAME_SIZE[0] + cfg.PANEL_WIDTH, cfg.FRAME_SIZE[1])
 
     period = 1.0 / cfg.TARGET_FPS                          # 10 fps cap
     start = last_wall = time.monotonic()
@@ -369,10 +450,13 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
                 print(f"Yawn threshold: MAR >= {pipeline.mar_threshold:.3f} "
                       f"({pipeline.calibration_note}{base})")
             note = on_frame(t, det, state) if on_frame else ""
-            shown = draw_overlay(frame, det, state, fps, wide, player.muted, note or "")
+            camera = draw_camera(frame, det, state, note or "")      # boxes + labels
+            if display:                                              # camera | details
+                shown = np.hstack([camera, draw_panel(camera.shape[0], det, state, fps,
+                                                      wide, player.muted)])
             player.update(state)
             if recorder:
-                recorder.add_frame(t, to_clip(shown if cfg.RECORD_OVERLAY else frame))
+                recorder.add_frame(t, to_clip(camera if cfg.RECORD_OVERLAY else frame))
             for ev in state["events"]:
                 all_events.append(ev)
                 if alert_log:
@@ -386,7 +470,7 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
 
             if display:
                 cv2.imshow(WINDOW, shown)
-                _keep_aspect(*cfg.FRAME_SIZE)
+                _keep_aspect(shown.shape[1], shown.shape[0])
                 # hold 10 fps: webcam -> fixed period, video -> follow video clock
                 target = (last_wall + period) if live else (start + t + period)
                 wait_ms = max(1, int((target - time.monotonic()) * 1000))

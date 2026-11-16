@@ -68,6 +68,7 @@ CAMERA_NATIVE_TRY = ((1920, 1080), (1280, 720))
 # up before detection, to mimic the low pixel density of the 160-degree lens
 # (800x600 -> 400x300 -> 800x600).
 LENS160_SCALE = 0.5
+PANEL_WIDTH = 340                  # details panel beside the camera view (pixels)
 MODEL_VARIANT = "int8"             # "int8" or "float" TFLite model in the demo
 
 # -------------------------------------------------- per-frame decisions ---
@@ -133,7 +134,7 @@ RECORD_LEVELS = (2, 3)             # only these levels are recorded
 CLIP_PRE_S = 5.0
 CLIP_POST_S = 5.0
 CLIP_SIZE = (640, 480)             # saved clips are scaled to this size
-RECORD_OVERLAY = True              # save the annotated frame (False = raw frame)
+RECORD_OVERLAY = True              # save the camera view with labeled boxes (False = raw frame)
 
 # ------------------------------------------------------------- scenarios ---
 # Expected highest alert level, matched by keyword in the video file name.

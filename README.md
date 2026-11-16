@@ -84,6 +84,11 @@ folder first.
 
 `--wide` and `--mute` start the demo with those modes already on.
 
+## Demo window
+
+- **Camera view (left):** only the tracked boxes, each with a name tag: `face` (magenta), each eye as `open 0.98` (green) or `closed 0.93` (red), and the mouth as `mouth 0.02` (green) or `yawn 0.71` (red). The number is the model confidence for eyes and the MAR for the mouth. Calibration and test prompts also appear here, and the border flashes red during the alarm.
+- **Details panel (right):** the alert level card with its message, then Driver (eyes, mouth, MAR against its threshold, PERCLOS), Offenses (count, kind of each, last one, time to the next drop), System (fps, 160-degree mode, sound) and the keys.
+
 ## Camera settings
 
 | Setting | Value |
@@ -94,8 +99,8 @@ folder first.
 | Model input | Eye and mouth crops are resized to 96x96 grayscale |
 | 160-degree mode | Frame is downscaled to 400x300 and scaled back to 800x600 before detection, to mimic the low pixel density of the 160-degree lens |
 | Frame rate | Processing is capped at 10 fps; the actual rate is shown on screen |
-| Display window | Freely resizable, kept at the frame's aspect ratio (4:3 for SVGA). Window size does not affect detection |
-| Event clips | Saved at 640x480 MJPEG |
+| Display window | 4:3 camera view with a details panel on its right. Freely resizable, kept at that shape. Window size does not affect detection |
+| Event clips | Saved at 640x480 MJPEG: the camera view with its labeled boxes, without the panel |
 
 A 16:9 camera image is centre-cropped to 4:3 (not squashed) before the resize.
 Video files go through the same resize, so scenario results match the live demo.
@@ -111,7 +116,7 @@ Video files go through the same resize, so scenario results match the live demo.
 | Mouth CNN | When MAR is above the threshold, the mouth-crop CNN must also say "yawn" (`YAWN_USE_CNN = True`). Set it to `False` to use MAR alone |
 | Yawn offense | Yawn frames continuously for 4 s (one other frame in between is allowed) |
 
-The screen shows the live value as `Mouth: MAR 0.12 / 0.36` (value / threshold),
+The details panel shows the live value as `MAR 0.12 (yawn >= 0.36)`,
 plus the CNN score while the mouth is open. No yawns are counted during
 calibration. Every frame's MAR is logged to `events\mar_<start time>.csv`.
 
