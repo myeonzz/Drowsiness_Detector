@@ -143,12 +143,12 @@ def compare_yawn_methods():
 if __name__ == "__main__":
     config.RESULTS_DIR.mkdir(exist_ok=True)
     all_rows = []
-    for model_name in config.MODELS:
+    for model_name in ("eye",):
         all_rows += evaluate_model(model_name)
     df = pd.DataFrame(all_rows)
     df.to_csv(config.RESULTS_DIR / "summary.csv", index=False, float_format="%.4f")
     pd.set_option("display.width", 200)
     print(df.round(4).to_string(index=False))
-    print("\nYawn decision per photo (mouth test set):")
-    print(compare_yawn_methods().round(4).to_string(index=False))
+    #print("\nYawn decision per photo (mouth test set):")
+    #print(compare_yawn_methods().round(4).to_string(index=False))
     print(f"\nSaved charts, summary.csv and yawn_methods.csv in {config.RESULTS_DIR}")

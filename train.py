@@ -1,4 +1,4 @@
-"""Train the two binary models (eye: Open/Closed, mouth: no_yawn/yawn), save
+.\.venv\Scripts\python.exe evaluate.py eye"""Train the two binary models (eye: Open/Closed, mouth: no_yawn/yawn), save
 them as .keras and convert to float + INT8 TensorFlow Lite.
 
     python train.py            # both models
