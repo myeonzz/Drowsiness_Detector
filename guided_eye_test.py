@@ -9,10 +9,10 @@ Timeline (default):  6 s get ready (eyes open, mouth closed, mouth calibration)
                      end                 -> 1 long low beep
 Short low ticks sound in the last 3 s of every phase as a countdown.
 
-Uses demo.Pipeline through demo.run(), so it must sit in the same folder as
-demo.py. Only the eye CNN is evaluated. Alerts and sounds are off.
+Uses demo.run(), so it must sit in the same folder as demo.py. Only the eye
+CNN decision is evaluated (raw, no smoothing). Alerts and sounds are off.
 
-Output: printed table, results\\eye_test_cnn.csv (appended), 
+Output: printed table, results\\eye_test_cnn.csv (appended),
         results\\eye_test_<label>_frames.csv and results\\eye_test_<label>.png
 """
 import argparse
@@ -29,15 +29,13 @@ import demo
 
 try:
     import winsound
-except ImportError:                      # not Windows: no beeps, text only
+except ImportError:
     winsound = None
 
 RESULTS = Path(__file__).resolve().parent / "results"
-EMA_W = 0.4                              # weight of the newest frame (smoothed column)
 
 
 def beeps(pattern):
-    """pattern = [(Hz, ms), ...]; played in a thread so the video never stalls."""
     if winsound is None:
         return
 
@@ -60,7 +58,7 @@ def main():
     args = ap.parse_args()
     src = int(args.source) if args.source.isdigit() else args.source
 
-    phases = [  # name, expected, duration, on-screen text, start beeps
+    phases = [
         ("lead-in", None, args.lead, "GET READY - eyes open, mouth closed", [(600, 150)]),
         ("eyes open", "open", args.t_open, "EYES OPEN", [(900, 250)]),
         ("droopy", "not closed", args.droopy, "DROOPY (half closed)", [(1100, 250)] * 2),
@@ -72,8 +70,8 @@ def main():
         t0 += p[2]
     total = t0
 
-    st = {"idx": -1, "tick": None, "ema": None}
-    rows = []        # (t, phase_idx, found, p, p_closed, ema, closed_smooth)
+    st = {"idx": -1, "tick": None}
+    rows = []        # (t, phase_idx, found, p, closed)
 
     def locate(t):
         for i, p in enumerate(phases):
@@ -84,7 +82,7 @@ def main():
     def on_frame(t, det, state):
         idx, left = locate(t)
         if idx is None:
-            return "DONE - press Q"
+            return "DONE"
         if idx != st["idx"]:
             st["idx"], st["tick"] = idx, None
             beeps(phases[idx][4])
@@ -92,16 +90,11 @@ def main():
         if tick in (3, 2, 1) and tick != st["tick"] and left > 0.05:
             st["tick"] = tick
             beeps([(500, 60)])
-        if idx > 0:                                   # lead-in is not recorded
+        if idx > 0:
             p = det["p_eye_cnn"]
             found = det["p_closed"] is not None and p is not None
-            ema = closed_s = None
-            if found:
-                st["ema"] = p if st["ema"] is None else EMA_W * p + (1 - EMA_W) * st["ema"]
-                ema = st["ema"]
-                closed_s = ema >= cfg.CLOSED_CONF_MIN
             rows.append((t, idx, found, p if found else None,
-                         bool(det["p_closed"]) if found else None, ema, closed_s))
+                         bool(det["p_closed"]) if found else None))
         return f"{phases[idx][3]}  {left:.0f} s"
 
     summary = demo.run(src, display=True, sound=False, record=False, verbose=True,
@@ -113,47 +106,38 @@ def main():
         print("\nStopped early, nothing saved. Run it again and let it finish.")
         return
 
-    # ---- table ----
     slug = re.sub(r"[^a-z0-9]+", "_", args.label.lower()).strip("_")
     RESULTS.mkdir(exist_ok=True)
     table = []
     print(f"\nEYE TEST (CNN only): {args.label}")
-    print(f"{'phase':<12}{'expected':<12}{'frames':>7}{'no_eyes':>9}{'closed_%':>10}"
-          f"{'smoothed_%':>12}{'mean_P(closed)':>16}")
+    print(f"{'phase':<12}{'expected':<12}{'frames':>7}{'no_eyes':>9}{'closed_%':>10}{'mean_P(closed)':>16}")
     for i in (1, 2, 3):
         name, expected = phases[i][0], phases[i][1]
         sel = [r for r in rows if r[1] == i and r[0] - starts[i] >= args.skip]
         n = len(sel)
         found = [r for r in sel if r[2]]
-        raw = 100 * np.mean([r[4] for r in found]) if found else float("nan")
-        sm_rows = [r for r in found if r[6] is not None]
-        sm = 100 * np.mean([r[6] for r in sm_rows]) if sm_rows else float("nan")
+        pct = 100 * np.mean([r[4] for r in found]) if found else float("nan")
         mp = float(np.mean([r[3] for r in found])) if found else float("nan")
-        table.append((args.label, name, expected, n, n - len(found), raw, sm, mp))
-        print(f"{name:<12}{expected:<12}{n:>7}{n - len(found):>9}{raw:>10.1f}{sm:>12.1f}{mp:>16.3f}")
+        table.append((args.label, name, expected, n, n - len(found), pct, mp))
+        print(f"{name:<12}{expected:<12}{n:>7}{n - len(found):>9}{pct:>10.1f}{mp:>16.3f}")
     print("closed_% = share of frames with eyes found that the CNN called closed "
           "(open and droopy should be low, closed should be high).")
-    print(f"smoothed_% = same after an exponential moving average (weight {EMA_W}). "
-          f"First {args.skip} s of each phase ignored.")
 
-    # ---- files ----
     csv_path = RESULTS / "eye_test_cnn.csv"
     new = not csv_path.exists()
     with open(csv_path, "a", newline="") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["label", "phase", "expected", "frames", "no_eyes",
-                        "closed_pct", "closed_pct_smoothed", "mean_p_closed"])
+            w.writerow(["label", "phase", "expected", "frames", "no_eyes", "closed_pct", "mean_p_closed"])
         for r in table:
-            w.writerow([r[0], r[1], r[2], r[3], r[4], f"{r[5]:.1f}", f"{r[6]:.1f}", f"{r[7]:.3f}"])
+            w.writerow([r[0], r[1], r[2], r[3], r[4], f"{r[5]:.1f}", f"{r[6]:.3f}"])
     frames_path = RESULTS / f"eye_test_{slug}_frames.csv"
     with open(frames_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["time_s", "phase", "eyes_found", "p_closed", "closed", "p_smoothed", "closed_smoothed"])
-        for t, i, fd, p, c, e, cs in rows:
-            w.writerow([f"{t:.2f}", phases[i][0], int(fd), "" if p is None else f"{p:.4f}",
-                        "" if c is None else int(c), "" if e is None else f"{e:.4f}",
-                        "" if cs is None else int(cs)])
+        w.writerow(["time_s", "phase", "eyes_found", "p_closed", "closed"])
+        for t, i, fd, p, c in rows:
+            w.writerow([f"{t:.2f}", phases[i][0], int(fd),
+                        "" if p is None else f"{p:.4f}", "" if c is None else int(c)])
     print(f"Saved {csv_path}\nSaved {frames_path}")
 
     try:
@@ -165,9 +149,7 @@ def main():
         for i in (1, 2, 3):
             ax.axvspan(starts[i], starts[i] + phases[i][2], color=shade[i], alpha=0.6, lw=0)
             ax.text(starts[i] + 0.3, 1.03, phases[i][0], fontsize=8)
-        ts = [r[0] for r in rows if r[2]]
-        ax.plot(ts, [r[3] for r in rows if r[2]], lw=1, label="P(closed)")
-        ax.plot(ts, [r[5] for r in rows if r[2]], lw=1.5, label="smoothed")
+        ax.plot([r[0] for r in rows if r[2]], [r[3] for r in rows if r[2]], lw=1, label="P(closed)")
         ax.axhline(cfg.CLOSED_CONF_MIN, color="k", ls="--", lw=0.8, label=f"threshold {cfg.CLOSED_CONF_MIN}")
         ax.set_ylim(-0.02, 1.1)
         ax.set_xlabel("time (s)")
