@@ -50,7 +50,8 @@ MODELS = {
 # Eye dataset options (train.py).
 EYE_DATA_FULLFACE = False          # False: images are eye close-ups (used as given)
                                    # True: full-face frames, cropped with YuNet
-EYE_GROUP_SEP = "_"                # person id = file name up to the first separator;
+EYE_GROUP_SEP = "_"
+EYE_SPLIT_BY_PERSON = False                # person id = file name up to the first separator;
                                    # the eye split keeps each person in one set
 
 # Crop geometry (shared by training and the live demo).

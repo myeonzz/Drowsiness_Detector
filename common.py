@@ -214,16 +214,52 @@ def augment(img, rng):
 
 
 # --------------------------------------------------------------- dataset ---
+def _grouped_split(y, g, seed, tries=3000):
+    """Whole groups (people) stay in one set. Tries many random groupings and
+    keeps the one whose IMAGE counts are closest to 70/15/15 and whose class
+    balance is closest to the full data. Both classes must be in every set.
+    Returns (i_train, i_val, i_test) index arrays, or None if none qualifies."""
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    groups = np.unique(g)
+    members = {k: np.flatnonzero(g == k) for k in groups}
+    train_f = 1 - config.VAL_FRACTION - config.TEST_FRACTION
+    targets = np.array([train_f, config.VAL_FRACTION, config.TEST_FRACTION])
+    cuts = (train_f * n, (train_f + config.VAL_FRACTION) * n)
+    pos_rate = float(y.mean())
+
+    best, best_score = None, 1e9
+    for _ in range(tries):
+        sets = ([], [], [])
+        count = 0
+        for k in rng.permutation(groups):
+            s = 0 if count < cuts[0] else (1 if count < cuts[1] else 2)
+            sets[s].append(members[k])
+            count += len(members[k])
+        if any(len(s) == 0 for s in sets):
+            continue
+        idx = [np.concatenate(s) for s in sets]
+        if any(len(set(y[i].tolist())) < 2 for i in idx):
+            continue
+        fractions = np.array([len(i) / n for i in idx])
+        score = float(np.abs(fractions - targets).sum())               # size error
+        score += 0.5 * sum(abs(float(y[i].mean()) - pos_rate) for i in idx)  # class balance
+        if score < best_score:
+            best, best_score = idx, score
+    return tuple(best) if best is not None else None
+
+
 def load_split(name):
     """Load cached 96x96 data for a model and return the fixed 70/15/15 split:
     dict with (X, y) tuples under 'train', 'val', 'test'.
 
     If the cache has a 'group' array (eye model: person id from the file name)
     with more than two distinct groups, whole groups are kept in one set so the
-    same person is not in both training and test. Otherwise (or if a grouped
-    split leaves a class out of val/test) it falls back to the stratified
-    random split."""
-    from sklearn.model_selection import GroupShuffleSplit, train_test_split
+    same person is not in both training and test; the grouping is chosen so the
+    image counts land as close to 70/15/15 as the group sizes allow. Otherwise
+    (or if no grouping works) it falls back to the exact stratified random split.
+    The real ratio is printed every time."""
+    from sklearn.model_selection import train_test_split
 
     data = np.load(config.CACHE_DIR / f"{name}.npz")
     X, y = data["X"], data["y"]
@@ -238,20 +274,17 @@ def load_split(name):
         return i_tr, i_val, i_te
 
     splits, mode = None, "random (stratified)"
-    if "group" in data.files and len(set(data["group"].tolist())) > 2:
-        g = data["group"]
-        i_tr, i_tmp = next(GroupShuffleSplit(1, test_size=hold, random_state=config.SEED)
-                           .split(idx, y, g))
-        j_val, j_te = next(GroupShuffleSplit(1, test_size=config.TEST_FRACTION / hold,
-                                             random_state=config.SEED)
-                           .split(i_tmp, y[i_tmp], g[i_tmp]))
-        i_val, i_te = i_tmp[j_val], i_tmp[j_te]
-        if len(set(y[i_val])) == 2 and len(set(y[i_te])) == 2:
-            splits, mode = (i_tr, i_val, i_te), "by group (person)"
+    if (config.EYE_SPLIT_BY_PERSON and "group" in data.files
+            and len(set(data["group"].tolist())) > 2):
+        found = _grouped_split(y, data["group"], config.SEED)
+        if found is not None:
+            splits, mode = found, "by group (person)"
     if splits is None:
         splits = stratified()
     i_tr, i_val, i_te = splits
-    print(f"[{name}] split: {mode}")
+    n = len(y)
+    print(f"[{name}] split: {mode} -> train {len(i_tr) / n:.1%}, "
+          f"val {len(i_val) / n:.1%}, test {len(i_te) / n:.1%}")
 
     split = {"train": (X[i_tr], y[i_tr]), "val": (X[i_val], y[i_val]), "test": (X[i_te], y[i_te])}
     if "mar" in data.files:                # mouth aspect ratio of each photo (mouth model)
