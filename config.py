@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------- paths ---
-DATA_DIR = ROOT / "train"
+DATA_DIR = Path(r"D:\Downloads\train")
 MODELS_DIR = ROOT / "models"
 RESULTS_DIR = ROOT / "results"
 EVENTS_DIR = ROOT / "events"
@@ -16,12 +16,22 @@ SCENARIOS_DIR = ROOT / "scenarios"
 CACHE_DIR = ROOT / "cache"
 
 # MediaPipe Face Landmarker (the current replacement for "Face Mesh").
+# Now used ONLY by the mouth / yawn side (MAR + mouth crop).
 # train.py / demo.py download it automatically if it is missing.
 FACE_LANDMARKER_PATH = MODELS_DIR / "face_landmarker.task"
 FACE_LANDMARKER_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
     "face_landmarker/float16/1/face_landmarker.task"
 )
+
+# YuNet face + eye-centre detector (OpenCV). Used for the EYE pipeline instead
+# of MediaPipe. Downloaded automatically if missing.
+YUNET_PATH = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
+YUNET_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/"
+    "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
+YUNET_SCORE = 0.6                  # face detection confidence
 
 # ------------------------------------------------------------------ data ---
 SEED = 42
@@ -37,11 +47,21 @@ MODELS = {
     "mouth": ("no_yawn", "yawn"),
 }
 
+# Eye dataset options (train.py).
+EYE_DATA_FULLFACE = False          # False: images are eye close-ups (used as given)
+                                   # True: full-face frames, cropped with YuNet
+EYE_GROUP_SEP = "_"                # person id = file name up to the first separator;
+                                   # the eye split keeps each person in one set
+
 # Crop geometry (shared by training and the live demo).
 FACE_MARGIN = 0.10                 # extra border around the landmark box
-EYE_CROP_SCALE = 1.7               # square side = scale * eye-corner distance
-EYE_CROP_SHIFT_UP = 0.12           # shift crop up (fraction of side) to include the brow
 MOUTH_CROP_SCALE = 1.5             # square side = scale * mouth outline size
+# Eye crops now come from YuNet eye centres: square side = scale * eye-to-eye
+# distance. Tune by comparing saved live crops with the training images.
+EYE_CROP_SCALE_YUNET = 0.70
+EYE_CROP_SHIFT_UP = 0.12           # shift crop up (fraction of side) to include the brow
+# Legacy (MediaPipe eye corners); no longer used by the eye pipeline.
+EYE_CROP_SCALE = 1.7
 
 # -------------------------------------------------------------- training ---
 EPOCHS = 100
@@ -77,29 +97,27 @@ YAWN_CONF_MIN = 0.70               # count "yawn" only if P(yawn) >= this
 OPEN_FRAME_TOLERANCE = 1           # open frames allowed inside a closure
 YAWN_FRAME_TOLERANCE = 1           # non-yawn frames allowed inside a yawn
 
-# Startup calibration (C key repeats it): the driver keeps the eyes open and
-# the mouth closed while the open-eye EAR and closed-mouth MAR are measured.
+# Startup calibration (C key repeats it): the driver keeps the mouth closed
+# while the closed-mouth MAR is measured. There is no eye calibration any more.
 CALIBRATION_S = 5.0
 
-# Eye closure. Two signals per frame:
-#   cnn: the eye CNN says Closed with confidence >= CLOSED_CONF_MIN
-#   ear: Eye Aspect Ratio closure % = 1 - EAR / EAR_open, at or above EAR_CLOSURE_MIN
-#        (EAR_open is the driver's own open-eye EAR, so eye shape does not matter)
-# EYE_CLOSED_RULE decides how they combine into "this frame is closed":
-#   "cnn" | "ear" | "either" (cnn OR ear) | "both" (cnn AND ear)
-# "ear" was the most reliable rule in the guided eye tests (no false closures).
-EYE_CLOSED_RULE = "ear"
-EAR_CLOSURE_MIN = 0.80             # "80 % closed"; also the PERCLOS (P80) criterion
-DROOPY_CLOSURE_MIN = 0.25          # closure at/above this (but not closed) = "droopy" (display only)
+# Eye closure. The eye CNN is the only eye signal: a frame is "closed" when
+# P(Closed) of both eyes is >= CLOSED_CONF_MIN. No MediaPipe / EAR.
+EYE_CLOSED_RULE = "cnn"
 EYES_CLOSED_WARN_S = 2.0           # red "EYES CLOSED" banner on the camera view after this many seconds
 # True: the level card follows the eyes in real time (open eyes -> NORMAL at once;
 #       closed 2 s -> CAUTION; closed 3 s -> CRITICAL "WAKE UP").
 # False: the original offense-count level, which stays up until offenses leave
 #        the 10-minute window.
 LEVEL_REALTIME = False
-EAR_CLOSED_MANUAL = None           # e.g. 0.08: closed when EAR <= this, instead of the 80 % rule
-EAR_OPEN_DEFAULT = 0.30            # used when calibration is rejected
-EAR_OPEN_MIN = 0.12                # calibration is rejected if the eyes were closed / hidden
+
+# ---- Legacy EAR settings: NOT used by the new eye pipeline. Kept only so ----
+# ---- older scripts (yawn_test.py, scenarios.py) that import them still run. --
+EAR_CLOSURE_MIN = 0.80
+DROOPY_CLOSURE_MIN = 0.25
+EAR_CLOSED_MANUAL = None
+EAR_OPEN_DEFAULT = 0.30
+EAR_OPEN_MIN = 0.12
 
 # Yawn detection. Primary signal: Mouth Aspect Ratio from the lip landmarks
 # (MAR = inner-lip opening / mouth width). A yawn frame = MAR at or above the
@@ -111,8 +129,7 @@ MAR_THRESHOLD_MIN = 0.30           # the threshold never goes below this
 MAR_BASELINE_DEFAULT = 0.02        # used when calibration is rejected
 MAR_BASELINE_MAX = 0.20            # calibration is rejected if the mouth was open
 # Secondary check: the mouth-crop CNN must also say "yawn" before a frame counts.
-# False for now: the mouth model has not been trained (eyes-only work), and
-# demo.py would crash looking for it. Set True again once it is trained.
+# If no trained mouth model is found, demo.py falls back to MAR only.
 YAWN_USE_CNN = True
 YAWN_CNN_MIN = 0.50                # P(yawn) from the mouth CNN needed to agree
 
@@ -120,7 +137,8 @@ YAWN_CNN_MIN = 0.50                # P(yawn) from the mouth CNN needed to agree
 # much darker than the rest of the face (median gray ratio below this).
 # 0.45 flagged dark sunglasses and no bare eyes on the dataset's car photos.
 EYE_DARK_RATIO = 0.45
-EYE_DARK_BOX_SCALE = 0.9           # checked box side = scale * eye-corner distance
+EYE_DARK_BOX_SCALE_YUNET = 0.375   # checked box side = scale * eye-to-eye distance
+EYE_DARK_BOX_SCALE = 0.9           # legacy (MediaPipe eye corners), unused
 EYES_UNKNOWN_AFTER_S = 3.0         # no visible eyes for this long -> "unknown"
 
 # ---------------------------------------------------------------- alerts ---
@@ -135,7 +153,7 @@ MICROSLEEP_S = 3.0                 # override: eyes closed this long -> Level 3 
 OVERRIDE_ONLY_WHILE_CLOSED = True
 ALARM_OPEN_RELEASE_S = 2.0         # Level-3 alarm stops after eyes open this long
 ALARM_NO_EYES_S = 5.0              # alarm length when the eyes are not visible (sunglasses)
-PERCLOS_WINDOW_S = 60.0            # rolling PERCLOS (P80) window, shown on screen only
+PERCLOS_WINDOW_S = 60.0            # rolling PERCLOS window (CNN-closed frames), shown on screen only
 
 LEVEL_NAMES = {0: "NORMAL", 1: "CAUTION", 2: "WARNING", 3: "CRITICAL"}
 LEVEL_COLORS_BGR = {0: (60, 170, 60), 1: (0, 215, 255), 2: (0, 140, 255), 3: (0, 0, 230)}
