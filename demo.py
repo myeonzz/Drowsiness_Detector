@@ -48,8 +48,12 @@ class Pipeline:
         variant = variant or cfg.MODEL_VARIANT
         self.finder = common.FaceFinder(video=True)
         self.eye_model = common.TFLiteModel(common.model_path("eye", variant))
-        self.mouth_model = (common.TFLiteModel(common.model_path("mouth", variant))
-                            if cfg.YAWN_USE_CNN else None)
+        self.mouth_model = None
+        if cfg.YAWN_USE_CNN:
+            try:
+                self.mouth_model = common.TFLiteModel(common.model_path("mouth", variant))
+            except Exception as err:         # no trained mouth model on this machine
+                print(f"Mouth model not found, yawns use MAR only ({err})")
         self.recalibrate()
 
     def recalibrate(self):

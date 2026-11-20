@@ -111,9 +111,8 @@ MAR_THRESHOLD_MIN = 0.30           # the threshold never goes below this
 MAR_BASELINE_DEFAULT = 0.02        # used when calibration is rejected
 MAR_BASELINE_MAX = 0.20            # calibration is rejected if the mouth was open
 # Secondary check: the mouth-crop CNN must also say "yawn" before a frame counts.
-# False for now: the mouth model has not been trained (eyes-only work), and
-# demo.py would crash looking for it. Set True again once it is trained.
-YAWN_USE_CNN = False
+# If no trained mouth model is found, demo.py falls back to MAR only.
+YAWN_USE_CNN = True
 YAWN_CNN_MIN = 0.50                # P(yawn) from the mouth CNN needed to agree
 
 # Sunglasses / occlusion check: eyes are "not visible" when the eye region is
@@ -130,6 +129,9 @@ OFFENSE_CLOSURE_S = 2.0            # offense: eyes closed continuously this long
 OFFENSE_YAWN_S = 4.0               # offense: one yawn lasting this long
 OFFENSE_WINDOW_S = 600.0           # offenses are counted over the last 10 minutes
 MICROSLEEP_S = 3.0                 # override: eyes closed this long -> Level 3 at once
+# True: a 3 s closure holds Level 3 only while the eyes stay closed; after they open
+# the level falls back to the offense count. False: holds for the whole 10-minute window.
+OVERRIDE_ONLY_WHILE_CLOSED = True
 ALARM_OPEN_RELEASE_S = 2.0         # Level-3 alarm stops after eyes open this long
 ALARM_NO_EYES_S = 5.0              # alarm length when the eyes are not visible (sunglasses)
 PERCLOS_WINDOW_S = 60.0            # rolling PERCLOS (P80) window, shown on screen only
