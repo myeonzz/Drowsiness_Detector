@@ -230,6 +230,7 @@ BOX_FACE = (255, 0, 255)                       # magenta
 BOX_OK = (0, 220, 0)                           # green: eye open / mouth normal
 BOX_BAD = (0, 0, 255)                          # red: eye closed / yawning
 BOX_UNKNOWN = (170, 170, 170)                  # gray: not classified
+BOX_DROOPY = (0, 140, 255)                     # orange: eye droopy
 
 
 def _put(img, text, org, scale=0.55, color=TEXT_MAIN, thick=1):
@@ -259,9 +260,10 @@ def _labeled_box(img, box, label, color, scale=0.5):
                 (0, 0, 0) if dark else (255, 255, 255), 1, cv2.LINE_AA)
 
 
-def draw_camera(frame, det, state, note=""):
+def draw_camera(frame, det, state, note="", closed_for=0.0):
     """Camera view: only the tracked boxes with their labels, plus the
-    messages that need the driver's attention (calibration, test prompts)."""
+    messages that need the driver's attention (calibration, test prompts,
+    and the red warning banner when the eyes stay closed)."""
     img = frame.copy()
     h, w = img.shape[:2]
 
@@ -273,7 +275,10 @@ def draw_camera(frame, det, state, note=""):
             continue
         name, color = ("closed", BOX_BAD) if det["p_closed"] else ("open", BOX_OK)
         if i < len(det["eye_closures"]):         # this eye's closure %, once calibrated
-            name += f" {det['eye_closures'][i] * 100:.0f}%"
+            closure = det["eye_closures"][i]
+            if not det["p_closed"] and closure >= cfg.DROOPY_CLOSURE_MIN:
+                name, color = "droopy", BOX_DROOPY
+            name += f" {closure * 100:.0f}%"
         _labeled_box(img, box, name, color)
     if det["mouth_box"]:
         if det["mar_threshold"] is None:
@@ -282,6 +287,11 @@ def draw_camera(frame, det, state, note=""):
             _labeled_box(img, det["mouth_box"], f"yawn {det['mar']:.2f}", BOX_BAD)
         else:
             _labeled_box(img, det["mouth_box"], f"mouth {det['mar']:.2f}", BOX_OK)
+
+    if closed_for >= cfg.EYES_CLOSED_WARN_S:                  # eyes closed too long
+        cv2.rectangle(img, (0, 0), (w, 70), (0, 0, 230), -1)
+        cv2.putText(img, f"WARNING: EYES CLOSED {closed_for:.0f} s", (14, 48),
+                    FONT, 1.1, (255, 255, 255), 3, cv2.LINE_AA)
 
     if note:
         _outlined(img, note, (14, h - 56), 0.9, (0, 255, 255))
@@ -343,7 +353,14 @@ def draw_panel(height, det, state, fps, wide=False, muted=False):
     # ---- driver ----
     section("DRIVER")
     if det["p_closed"] is not None:
-        row("Eyes", "CLOSED" if det["p_closed"] else "Open", red if det["p_closed"] else green)
+        droopy = (not det["p_closed"] and det["closure"] is not None
+                  and det["closure"] >= cfg.DROOPY_CLOSURE_MIN)
+        if det["p_closed"]:
+            row("Eyes", "CLOSED", red)
+        elif droopy:
+            row("Eyes", "Droopy", (0, 165, 255))
+        else:
+            row("Eyes", "Open", green)
         if det["closure"] is not None:           # live closure % from EAR
             row("Closure", f"{det['closure'] * 100:.0f}%  (EAR {det['ear']:.2f} / "
                            f"{det['ear_open']:.2f})", red if det["ear_closed"] else TEXT_MAIN)
@@ -480,6 +497,7 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
     period = 1.0 / cfg.TARGET_FPS                          # 10 fps cap
     start = last_wall = time.monotonic()
     fps, frame_idx, processed, t, all_events = 0.0, -1, 0, 0.0, []
+    closed_since, open_run = None, 0
     try:
         while True:
             ok, frame = cap.read()
@@ -498,6 +516,33 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
             state = engine.update(t, det["p_closed"], det["p_yawn"], det["p80"])
             processed += 1
 
+            # how long the eyes have been closed without a break (a blink-sized
+            # gap of OPEN_FRAME_TOLERANCE frames does not reset it)
+            if det["p_closed"]:
+                if closed_since is None:
+                    closed_since = t
+                open_run = 0
+            elif det["p_closed"] is not None:
+                open_run += 1
+                if open_run > cfg.OPEN_FRAME_TOLERANCE:
+                    closed_since = None
+            else:
+                closed_since = None                       # eyes not visible
+            closed_for = 0.0 if closed_since is None else t - closed_since
+
+            # what the screen shows: by default the level follows the eyes live
+            shown_state = state
+            if cfg.LEVEL_REALTIME:
+                if closed_for >= cfg.MICROSLEEP_S:
+                    live_level = 3
+                elif closed_for >= cfg.OFFENSE_CLOSURE_S:
+                    live_level = 1
+                else:
+                    live_level = 0
+                shown_state = dict(state, level=live_level, text=cfg.LEVEL_TEXT[live_level],
+                                   alarm=(live_level == 3),
+                                   override=bool(state["override"]) and live_level == 3)
+
             now = time.monotonic()
             if processed > 1:
                 inst = 1.0 / max(now - last_wall, 1e-6)
@@ -514,9 +559,9 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
                       f"(closed-mouth MAR {pipeline.mar_baseline:.3f}). "
                       f"Eye rule: {cfg.EYE_CLOSED_RULE}")
             note = on_frame(t, det, state) if on_frame else ""
-            camera = draw_camera(frame, det, state, note or "")      # boxes + labels
+            camera = draw_camera(frame, det, shown_state, note or "", closed_for)   # boxes + labels
             if display:                                              # camera | details
-                shown = np.hstack([camera, draw_panel(camera.shape[0], det, state, fps,
+                shown = np.hstack([camera, draw_panel(camera.shape[0], det, shown_state, fps,
                                                       wide, player.muted)])
             player.update(state)
             if recorder:

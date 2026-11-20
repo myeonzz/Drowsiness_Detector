@@ -1,4 +1,4 @@
 phase,expected,frames,median_ear,median_closure_pct,median_cnn_p_closed,closed_pct_cnn,closed_pct_ear,closed_pct_either,closed_pct_both
-eyes open,open,142,0.231,29.4,0.0,5.6,0.0,5.6,0.0
-droopy,open (not 80% closed),65,0.221,32.7,0.0,0.0,0.0,0.0,0.0
-eyes closed,closed,27,0.282,13.8,0.0,0.0,0.0,0.0,0.0
+eyes open,open,19,0.287,0.0,0.0,0.0,0.0,0.0,0.0
+droopy,open (not 80% closed),0,,,,0.0,0.0,0.0,0.0
+eyes closed,closed,0,,,,0.0,0.0,0.0,0.0
