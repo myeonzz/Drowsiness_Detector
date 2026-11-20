@@ -9,7 +9,8 @@ Keys:  W = 160-degree mode on/off   M = mute on/off
        C = recalibrate (mouth closed)   Q or Esc = quit
 
 Eyes: OpenCV YuNet finds the face and eye centres, the eye CNN decides
-open / closed. No MediaPipe and no EAR for the eyes.
+open / closed. No MediaPipe and no EAR for the eyes. The eye P(closed) is
+smoothed with an exponential moving average (cfg.EYE_SMOOTH_ALPHA).
 Mouth: MediaPipe landmarks -> MAR, confirmed by the mouth CNN.
 """
 import argparse
@@ -64,6 +65,7 @@ class Pipeline:
                 self.mouth_model = common.TFLiteModel(common.model_path("mouth", variant))
             except Exception as err:         # no trained mouth model on this machine
                 print(f"Mouth model not found, yawns use MAR only ({err})")
+        self._p_smooth = None                            # EMA of the eye P(closed)
         self.recalibrate()
 
     def recalibrate(self):
@@ -106,7 +108,7 @@ class Pipeline:
                # eyes
                "eye_boxes": [], "eye_probs": [], "eye_closures": [], "occluded": False,
                "ear": None, "ear_open": None, "closure": None,      # legacy, always None
-               "p_eye_cnn": None, "cnn_closed": None, "ear_closed": None,
+               "p_eye_cnn": None, "p_eye_raw": None, "cnn_closed": None, "ear_closed": None,
                "p80": None, "p_closed": None,
                # mouth
                "mouth_box": None, "mar": None, "mar_threshold": self.mar_threshold,
@@ -115,17 +117,26 @@ class Pipeline:
 
         # ---- eyes: YuNet + eye CNN (independent of MediaPipe) ----
         found = self.eye_finder.find(frame, t)
-        if found is not None:
+        if found is None:
+            self._p_smooth = None                        # lost the face: start fresh
+        else:
             out["face_found"] = True
             out["face_box"] = _clip_box(*found["face"], frame.shape)
             boxes = common.eye_boxes_yunet(found, frame.shape)
             out["eye_boxes"] = [b for b in boxes if b is not None]
             out["occluded"] = common.eyes_look_occluded_yunet(gray, found, boxes)
-            if not out["occluded"]:
+            if out["occluded"]:
+                self._p_smooth = None
+            else:
                 probs = [float(self.eye_model.predict(
                     common.preprocess(common.crop(gray, b)))[1]) for b in boxes]
                 out["eye_probs"] = probs
-                out["p_eye_cnn"] = float(min(probs))     # both eyes must look closed
+                raw = float(min(probs))                  # both eyes must look closed
+                a = cfg.EYE_SMOOTH_ALPHA
+                self._p_smooth = (raw if self._p_smooth is None
+                                  else a * raw + (1 - a) * self._p_smooth)
+                out["p_eye_raw"] = raw
+                out["p_eye_cnn"] = self._p_smooth
                 out["cnn_closed"] = out["p_eye_cnn"] >= cfg.CLOSED_CONF_MIN
                 out["p_closed"] = 1.0 if out["cnn_closed"] else 0.0
                 out["p80"] = out["cnn_closed"]           # PERCLOS now counts CNN-closed frames
@@ -406,7 +417,7 @@ def _keep_aspect(view_w, view_h):
 class FrameLog:
     """Per-frame signal log: events/frames_<start>.csv (eye CNN score, MAR and
     the decisions made from them). The EAR columns are kept (empty) so old
-    analysis scripts still read the file."""
+    analysis scripts still read the file. eye_cnn is the smoothed P(closed)."""
 
     def __init__(self, out_dir=None):
         out_dir = out_dir or cfg.EVENTS_DIR
@@ -535,7 +546,8 @@ def run(source=0, display=True, sound=True, muted=False, record=True, events_dir
                 print(f"Calibration: {pipeline.calibration_note}. "
                       f"Yawn when MAR >= {pipeline.mar_threshold:.3f} "
                       f"(closed-mouth MAR {pipeline.mar_baseline:.3f}). "
-                      f"Eye rule: CNN only (P(closed) >= {cfg.CLOSED_CONF_MIN})")
+                      f"Eye rule: CNN only (smoothed P(closed) >= {cfg.CLOSED_CONF_MIN}, "
+                      f"EMA alpha {cfg.EYE_SMOOTH_ALPHA})")
             note = on_frame(t, det, state) if on_frame else ""
             camera = draw_camera(frame, det, shown_state, note or "", closed_for)   # boxes + labels
             if display:                                              # camera | details

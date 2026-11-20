@@ -1,0 +1,4 @@
+label,phase,expected,frames,no_eyes_frames,closed_pct,mean_p_closed,saved_at
+"no glasses, normal light",eyes open,open,125,0,14.4,0.199,2026-11-20T20:39:04
+"no glasses, normal light",droopy,not closed,55,0,98.2,0.949,2026-11-20T20:39:04
+"no glasses, normal light",eyes closed,closed,0,0,nan,nan,2026-11-20T20:39:04

@@ -94,7 +94,11 @@ MODEL_VARIANT = "int8"             # "int8" or "float" TFLite model in the demo
 # -------------------------------------------------- per-frame decisions ---
 CLOSED_CONF_MIN = 0.70             # count "closed" only if P(Closed) >= this
 YAWN_CONF_MIN = 0.70               # count "yawn" only if P(yawn) >= this
-OPEN_FRAME_TOLERANCE = 1           # open frames allowed inside a closure
+# Eye P(closed) is smoothed with an exponential moving average before it is
+# compared with CLOSED_CONF_MIN: smoothed = a * new + (1 - a) * previous.
+# 1.0 = no smoothing; lower = smoother but slower to react.
+EYE_SMOOTH_ALPHA = 0.4
+OPEN_FRAME_TOLERANCE = 4           # open frames allowed inside a closure (was 1)
 YAWN_FRAME_TOLERANCE = 1           # non-yawn frames allowed inside a yawn
 
 # Startup calibration (C key repeats it): the driver keeps the mouth closed
