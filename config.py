@@ -87,8 +87,16 @@ CALIBRATION_S = 5.0
 #        (EAR_open is the driver's own open-eye EAR, so eye shape does not matter)
 # EYE_CLOSED_RULE decides how they combine into "this frame is closed":
 #   "cnn" | "ear" | "either" (cnn OR ear) | "both" (cnn AND ear)
-EYE_CLOSED_RULE = "either"
+# "ear" was the most reliable rule in the guided eye tests (no false closures).
+EYE_CLOSED_RULE = "ear"
 EAR_CLOSURE_MIN = 0.80             # "80 % closed"; also the PERCLOS (P80) criterion
+DROOPY_CLOSURE_MIN = 0.25          # closure at/above this (but not closed) = "droopy" (display only)
+EYES_CLOSED_WARN_S = 2.0           # red "EYES CLOSED" banner on the camera view after this many seconds
+# True: the level card follows the eyes in real time (open eyes -> NORMAL at once;
+#       closed 2 s -> CAUTION; closed 3 s -> CRITICAL "WAKE UP").
+# False: the original offense-count level, which stays up until offenses leave
+#        the 10-minute window.
+LEVEL_REALTIME = False
 EAR_CLOSED_MANUAL = None           # e.g. 0.08: closed when EAR <= this, instead of the 80 % rule
 EAR_OPEN_DEFAULT = 0.30            # used when calibration is rejected
 EAR_OPEN_MIN = 0.12                # calibration is rejected if the eyes were closed / hidden
@@ -103,7 +111,9 @@ MAR_THRESHOLD_MIN = 0.30           # the threshold never goes below this
 MAR_BASELINE_DEFAULT = 0.02        # used when calibration is rejected
 MAR_BASELINE_MAX = 0.20            # calibration is rejected if the mouth was open
 # Secondary check: the mouth-crop CNN must also say "yawn" before a frame counts.
-YAWN_USE_CNN = True
+# False for now: the mouth model has not been trained (eyes-only work), and
+# demo.py would crash looking for it. Set True again once it is trained.
+YAWN_USE_CNN = False
 YAWN_CNN_MIN = 0.50                # P(yawn) from the mouth CNN needed to agree
 
 # Sunglasses / occlusion check: eyes are "not visible" when the eye region is
