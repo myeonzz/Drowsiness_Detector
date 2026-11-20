@@ -83,9 +83,15 @@ class AlertEngine:
             return 0.0
         return sum(1 for _, c in self.eye_samples if c) / len(self.eye_samples)
 
+    def _override_active(self, t):
+        if cfg.OVERRIDE_ONLY_WHILE_CLOSED:
+            return "micro" in self.closure_flags   # the 3 s closure is still going
+        return (self.microsleep_t is not None
+                and t - self.microsleep_t <= cfg.OFFENSE_WINDOW_S)
+
     def _level(self, t):
-        if self.microsleep_t is not None and t - self.microsleep_t <= cfg.OFFENSE_WINDOW_S:
-            return 3                               # override holds while in the window
+        if self._override_active(t):
+            return 3
         return min(len(self.offenses), 3)
 
     def _start_alarm(self, t, eyes_open_now):
@@ -183,8 +189,7 @@ class AlertEngine:
             # kind of each offense in the window, oldest first
             "offense_kinds": [trigger_label(kind) for _, kind in self.offenses],
             # True while a >= 3 s closure is holding Level 3
-            "override": (self.microsleep_t is not None
-                         and t - self.microsleep_t <= cfg.OFFENSE_WINDOW_S),
+            "override": self._override_active(t),
             # latest offense / override: (label, seconds ago), or None
             "last_alert": None if self.last_alert is None else
                           (trigger_label(self.last_alert[1]), t - self.last_alert[0]),
