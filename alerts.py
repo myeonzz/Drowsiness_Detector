@@ -84,14 +84,15 @@ class AlertEngine:
         return sum(1 for _, c in self.eye_samples if c) / len(self.eye_samples)
 
     def _override_active(self, t):
-        if cfg.OVERRIDE_ONLY_WHILE_CLOSED:
+        """True while a >= 3 s closure is holding Level 3."""
+        if getattr(cfg, "OVERRIDE_ONLY_WHILE_CLOSED", False):
             return "micro" in self.closure_flags   # the 3 s closure is still going
         return (self.microsleep_t is not None
                 and t - self.microsleep_t <= cfg.OFFENSE_WINDOW_S)
 
     def _level(self, t):
         if self._override_active(t):
-            return 3
+            return 3                               # override: eyes closed >= 3 s
         return min(len(self.offenses), 3)
 
     def _start_alarm(self, t, eyes_open_now):
