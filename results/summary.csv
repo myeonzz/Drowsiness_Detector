@@ -1,7 +1,7 @@
-model,variant,positive_class,test_images,accuracy,precision,recall,f1,roc_auc,size_kb,avg_inference_ms
-eye,float (Keras),Closed,218,0.9954,1.0000,0.9908,0.9954,1.0000,1231.1426,10.1048
-eye,float (TFLite),Closed,218,0.9954,1.0000,0.9908,0.9954,1.0000,385.6797,0.3765
-eye,INT8 (TFLite),Closed,218,1.0000,1.0000,1.0000,1.0000,1.0000,107.6797,0.2017
-mouth,float (Keras),yawn,215,0.9953,0.9907,1.0000,0.9953,0.9998,1231.1426,10.0776
-mouth,float (TFLite),yawn,215,0.9953,0.9907,1.0000,0.9953,0.9998,385.6797,0.3100
-mouth,INT8 (TFLite),yawn,215,0.9953,0.9907,1.0000,0.9953,0.9997,107.6797,0.1998
+model,variant,positive_class,test_images,accuracy,precision,recall,f1,roc_auc,size_kb,avg_inference_ms,specificity,tn,fp,fn,tp
+eye,float (Keras),Closed,600,0.9983,1.0000,0.9967,0.9983,1.0000,1231.1426,12.5423,1.0000,300.0000,0.0000,1.0000,299.0000
+eye,float (TFLite),Closed,600,0.9983,1.0000,0.9967,0.9983,1.0000,385.6797,0.6123,1.0000,300.0000,0.0000,1.0000,299.0000
+eye,INT8 (TFLite),Closed,600,0.9983,1.0000,0.9967,0.9983,1.0000,107.6797,0.8954,1.0000,300.0000,0.0000,1.0000,299.0000
+mouth,float (Keras),yawn,215,0.9953,0.9907,1.0000,0.9953,0.9998,1231.1426,10.0776,,,,,
+mouth,float (TFLite),yawn,215,0.9953,0.9907,1.0000,0.9953,0.9998,385.6797,0.3100,,,,,
+mouth,INT8 (TFLite),yawn,215,0.9953,0.9907,1.0000,0.9953,0.9997,107.6797,0.1998,,,,,

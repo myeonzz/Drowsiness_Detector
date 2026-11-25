@@ -3,6 +3,10 @@ them as .keras and convert to float + INT8 TensorFlow Lite.
 
     python train.py            # both models
     python train.py eye        # only one
+
+Eye model: no MediaPipe. Images are used as given (close-ups), or cropped with
+YuNet if config.EYE_DATA_FULLFACE is True. Each eye image keeps a 'group'
+(person id from the file name) so the split can keep a person in one set.
 """
 import json
 import sys
@@ -20,15 +24,18 @@ from keras import layers
 
 # ------------------------------------------------------------------ data ---
 def build_cache(name):
-    """Read images, crop (mouth model: mouth only), resize to 96x96 gray,
-    cache as .npz. The mouth cache also keeps each photo's MAR."""
+    """Read images, crop, resize to 96x96 gray, cache as .npz.
+    Mouth: mouth crop via MediaPipe (also keeps each photo's MAR).
+    Eye: used as given (close-ups), or YuNet eye crops if EYE_DATA_FULLFACE;
+    also keeps a person/group id per image from the file name."""
     out = config.CACHE_DIR / f"{name}.npz"
     if out.exists():
         return
     config.CACHE_DIR.mkdir(exist_ok=True)
     config.RESULTS_DIR.mkdir(exist_ok=True)
     finder = common.FaceFinder(video=False) if name == "mouth" else None
-    X, y, mar, dropped = [], [], [], {}
+    eye_finder = common.EyeFinder() if (name == "eye" and config.EYE_DATA_FULLFACE) else None
+    X, y, mar, groups, dropped = [], [], [], [], {}
     for label, folder in enumerate(config.MODELS[name]):
         files = sorted((config.DATA_DIR / folder).glob("*"))
         dropped[folder] = {"total": len(files), "dropped": 0}
@@ -37,24 +44,42 @@ def build_cache(name):
             if img is None:
                 dropped[folder]["dropped"] += 1
                 continue
-            if finder is not None:                     # same crop as the demo
+            group = f.stem.split(config.EYE_GROUP_SEP)[0]
+            if finder is not None:                     # mouth: same crop as the demo
                 lm = finder.find(img)
                 box = common.mouth_box(lm, img.shape) if lm is not None else None
                 if box is None:
                     dropped[folder]["dropped"] += 1
                     continue
-                img = common.crop(img, box)
+                crops = [common.crop(img, box)]
                 mar.append(common.mouth_aspect_ratio(lm))
-            X.append(common.preprocess(img))
-            y.append(label)
+            elif eye_finder is not None:               # eye, full-face frame
+                found = eye_finder.find(img)
+                boxes = common.eye_boxes_yunet(found, img.shape) if found else []
+                crops = [common.crop(img, b) for b in boxes if b is not None]
+                if not crops:
+                    dropped[folder]["dropped"] += 1
+                    continue
+            else:                                      # eye close-up, used as given
+                crops = [img]
+            for c in crops:
+                X.append(common.preprocess(c))
+                y.append(label)
+                groups.append(group)
     if finder is not None:
         finder.close()
-    extra = {"mar": np.array(mar, np.float32)} if mar else {}
+    extra = {}
+    if mar:
+        extra["mar"] = np.array(mar, np.float32)
+    if name == "eye":                                  # group ids only for the eye split
+        extra["group"] = np.array(groups)
     np.savez_compressed(out, X=np.array(X, np.uint8), y=np.array(y, np.int64), **extra)
     for folder, d in dropped.items():
-        why = "no face found" if name == "mouth" else "unreadable"
+        why = "no face found" if (name == "mouth" or eye_finder) else "unreadable"
         print(f"[{name}] {folder}: {d['total'] - d['dropped']} kept, "
               f"{d['dropped']} dropped ({why}) of {d['total']}")
+    if name == "eye":
+        print(f"[{name}] {len(set(groups))} distinct groups (people) from file names")
     (config.RESULTS_DIR / f"{name}_dropped.json").write_text(json.dumps(dropped, indent=2))
 
 
@@ -129,6 +154,10 @@ def train_one(name):
     split = common.load_split(name)
     (X_tr, y_tr), (X_val, y_val) = split["train"], split["val"]
     print(f"[{name}] train {len(y_tr)}  val {len(y_val)}  test {len(split['test'][1])}")
+    for part in ("train", "val", "test"):
+        yy = split[part][1]
+        print(f"[{name}]   {part}: {config.MODELS[name][0]} {int((yy == 0).sum())}, "
+              f"{config.MODELS[name][1]} {int((yy == 1).sum())}")
 
     keras.utils.set_random_seed(config.SEED)
     model = build_model()

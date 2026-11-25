@@ -1,9 +1,12 @@
-"""Evaluate both models on their held-out test sets, float vs INT8.
+"""Evaluate the models on their held-out test sets, float vs INT8.
 Writes charts (PNG) and summary.csv to ./results.
 
-    python evaluate.py
+    python evaluate.py            # every model that has a cache (eye, mouth)
+    python evaluate.py eye        # only the eye model (keeps the mouth rows)
+    python evaluate.py mouth      # only the mouth model (keeps the eye rows)
 """
 import json
+import sys
 import time
 
 import matplotlib
@@ -62,21 +65,27 @@ def plot_training_curves(name):
 def evaluate_model(name):
     classes = config.MODELS[name]                      # (negative, positive)
     X, y = common.load_split(name)["test"]
+    print(f"[{name}] test set: {len(y)} images "
+          f"({classes[0]} {int((y == 0).sum())}, {classes[1]} {int((y == 1).sum())})")
     rows, cms, rocs = [], {}, {}
     for label, variant in VARIANTS.items():
         probs, ms = predict_all(variant, name, X)
         pred = (probs >= 0.5).astype(int)              # = argmax of the 2 outputs
         fpr, tpr, _ = roc_curve(y, probs)
-        cms[label] = confusion_matrix(y, pred)
+        cm = confusion_matrix(y, pred, labels=[0, 1])
+        cms[label] = cm
         rocs[label] = (fpr, tpr, auc(fpr, tpr))
+        tn, fp, fn, tp = (int(v) for v in cm.ravel())
         rows.append({
             "model": name, "variant": label, "positive_class": classes[1],
             "test_images": len(y),
             "accuracy": accuracy_score(y, pred),
             "precision": precision_score(y, pred, zero_division=0),
             "recall": recall_score(y, pred, zero_division=0),
+            "specificity": tn / (tn + fp) if (tn + fp) else float("nan"),
             "f1": f1_score(y, pred, zero_division=0),
             "roc_auc": rocs[label][2],
+            "tn": tn, "fp": fp, "fn": fn, "tp": tp,
             "size_kb": common.model_path(name, variant).stat().st_size / 1024,
             "avg_inference_ms": ms,
         })
@@ -106,7 +115,8 @@ def evaluate_model(name):
     fig.savefig(config.RESULTS_DIR / f"{name}_roc.png", dpi=150)
     plt.close(fig)
 
-    plot_training_curves(name)
+    if (config.RESULTS_DIR / f"{name}_history.json").exists():
+        plot_training_curves(name)
     return rows
 
 
@@ -140,15 +150,46 @@ def compare_yawn_methods():
     return df
 
 
+def has_cache(name):
+    return (config.CACHE_DIR / f"{name}.npz").exists()
+
+
 if __name__ == "__main__":
     config.RESULTS_DIR.mkdir(exist_ok=True)
+    requested = sys.argv[1:]
+    unknown = [n for n in requested if n not in config.MODELS]
+    if unknown:
+        raise SystemExit(f"Unknown model(s) {unknown}. Choose from {list(config.MODELS)}.")
+    names = requested or [n for n in config.MODELS if has_cache(n)]
+    if not names:
+        raise SystemExit("No cached data found. Run train.py first.")
+    for n in names:
+        if not has_cache(n):
+            raise SystemExit(f"cache\\{n}.npz is missing. Run: python train.py {n}")
+
     all_rows = []
-    for model_name in config.MODELS:
+    for model_name in names:
         all_rows += evaluate_model(model_name)
-    df = pd.DataFrame(all_rows)
-    df.to_csv(config.RESULTS_DIR / "summary.csv", index=False, float_format="%.4f")
-    pd.set_option("display.width", 200)
-    print(df.round(4).to_string(index=False))
-    print("\nYawn decision per photo (mouth test set):")
-    print(compare_yawn_methods().round(4).to_string(index=False))
-    print(f"\nSaved charts, summary.csv and yawn_methods.csv in {config.RESULTS_DIR}")
+    new = pd.DataFrame(all_rows)
+
+    # keep the rows of models that were not evaluated this time (e.g. the mouth
+    # rows from a teammate's earlier run) instead of overwriting the file
+    summary_path = config.RESULTS_DIR / "summary.csv"
+    df = new
+    if summary_path.exists():
+        try:
+            old = pd.read_csv(summary_path)
+            old = old[~old["model"].isin(names)]
+            df = pd.concat([old, new], ignore_index=True)
+        except Exception as err:
+            print(f"Could not merge with the existing summary.csv ({err}); overwriting it.")
+    order = {n: i for i, n in enumerate(config.MODELS)}
+    df = df.sort_values("model", key=lambda s: s.map(order), kind="stable")
+    df.to_csv(summary_path, index=False, float_format="%.4f")
+
+    pd.set_option("display.width", 220)
+    print(new.round(4).to_string(index=False))
+    if "mouth" in names:
+        print("\nYawn decision per photo (mouth test set):")
+        print(compare_yawn_methods().round(4).to_string(index=False))
+    print(f"\nSaved charts and summary.csv in {config.RESULTS_DIR}")
