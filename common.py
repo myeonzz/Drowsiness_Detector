@@ -1,9 +1,9 @@
-"""Shared helpers: face landmarks, cropping, preprocessing, augmentation,
+"""Shared helpers: YuNet detection, cropping, preprocessing, augmentation,
 dataset split and TFLite inference. Used by train / evaluate / demo so the
 exact same crop is applied at training and prediction time.
 
-Eyes: found with OpenCV YuNet (EyeFinder) - no MediaPipe, no EAR.
-Mouth: still MediaPipe Face Landmarker (FaceFinder) for MAR and the mouth crop."""
+Eyes and mouth: found with OpenCV YuNet (EyeFinder), with CNN classifiers
+for eye closure and yawning."""
 import os
 import urllib.request
 
@@ -15,63 +15,7 @@ import numpy as np
 
 import config
 
-# Lips: inner-lip midpoints, inner mouth corners, and the outer outline
-# (left corner, right corner, top of upper lip, bottom of lower lip).
-INNER_LIP_TOP, INNER_LIP_BOTTOM = 13, 14
-INNER_MOUTH_CORNERS = (78, 308)
-MOUTH_OUTLINE = (61, 291, 0, 17)
-
-
-# ----------------------------------------- face finder (MediaPipe, mouth) ---
-def ensure_landmarker_model():
-    path = config.FACE_LANDMARKER_PATH
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Downloading MediaPipe face landmarker -> {path}")
-        urllib.request.urlretrieve(config.FACE_LANDMARKER_URL, path)
-    return path
-
-
-class FaceFinder:
-    """MediaPipe Face Landmarker wrapper. Returns landmarks in pixels.
-    Used only for the mouth (MAR and mouth crop)."""
-
-    def __init__(self, video=False):
-        import mediapipe as mp
-        from mediapipe.tasks import python as mp_python
-        from mediapipe.tasks.python import vision
-
-        self._mp = mp
-        self._video = video
-        model_bytes = ensure_landmarker_model().read_bytes()
-        options = vision.FaceLandmarkerOptions(
-            base_options=mp_python.BaseOptions(model_asset_buffer=model_bytes),
-            running_mode=vision.RunningMode.VIDEO if video else vision.RunningMode.IMAGE,
-            num_faces=1,
-        )
-        self._landmarker = vision.FaceLandmarker.create_from_options(options)
-        self._last_ts = -1
-
-    def find(self, bgr, t=None):
-        """Return (N, 2) float array of landmark pixel coords, or None."""
-        rgb = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-        image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
-        if self._video:
-            ts = max(int((t or 0) * 1000), self._last_ts + 1)  # must increase
-            self._last_ts = ts
-            result = self._landmarker.detect_for_video(image, ts)
-        else:
-            result = self._landmarker.detect(image)
-        if not result.face_landmarks:
-            return None
-        h, w = bgr.shape[:2]
-        return np.array([(p.x * w, p.y * h) for p in result.face_landmarks[0]], dtype=np.float32)
-
-    def close(self):
-        self._landmarker.close()
-
-
-# ------------------------------------------------ eye finder (no MediaPipe) ---
+# --------------------------------------------------------- YuNet detector ---
 def ensure_yunet_model():
     path = config.YUNET_PATH
     if not path.exists():
@@ -83,7 +27,7 @@ def ensure_yunet_model():
 
 class EyeFinder:
     """OpenCV YuNet face detector. Returns the face box and both eye centres
-    in pixels, or None. Replaces MediaPipe for the eye pipeline."""
+    in pixels, or None."""
 
     def __init__(self):
         self._det = cv2.FaceDetectorYN.create(
@@ -119,13 +63,6 @@ def _square_box(cx, cy, side, shape):
     return x0, y0, x1, y1
 
 
-def face_box(landmarks, shape):
-    x0, y0 = landmarks.min(axis=0)
-    x1, y1 = landmarks.max(axis=0)
-    side = max(x1 - x0, y1 - y0) * (1 + 2 * config.FACE_MARGIN)
-    return _square_box((x0 + x1) / 2, (y0 + y1) / 2, side, shape)
-
-
 def eye_boxes_yunet(found, shape):
     """Square box around each eye centre (eye + brow), sized from the
     eye-to-eye distance. Same function is used for training (full-face data)
@@ -134,6 +71,15 @@ def eye_boxes_yunet(found, shape):
     side = float(np.linalg.norm(e1 - e2)) * config.EYE_CROP_SCALE_YUNET
     return [_square_box(c[0], c[1] - side * config.EYE_CROP_SHIFT_UP, side, shape)
             for c in (e1, e2)]
+
+
+def mouth_box_yunet(found, shape):
+    """Approximate the mouth region from the YuNet face box."""
+    x, y, w, h = found["face"]
+    side = max(w * config.MOUTH_CROP_WIDTH, h * config.MOUTH_CROP_HEIGHT)
+    cx = x + w * 0.50
+    cy = y + h * config.MOUTH_CROP_Y
+    return _square_box(cx, cy, side, shape)
 
 
 def eyes_look_occluded_yunet(gray_frame, found, boxes):
@@ -153,23 +99,6 @@ def eyes_look_occluded_yunet(gray_frame, found, boxes):
             return True
         ratios.append(float(np.median(crop(gray_frame, tight))) / face_med)
     return max(ratios) < config.EYE_DARK_RATIO
-
-
-def mouth_aspect_ratio(landmarks):
-    """MAR = vertical inner-lip opening / mouth width (inner corners).
-    About 0 with the mouth closed, large when it is wide open."""
-    opening = float(np.linalg.norm(landmarks[INNER_LIP_TOP] - landmarks[INNER_LIP_BOTTOM]))
-    width = float(np.linalg.norm(landmarks[INNER_MOUTH_CORNERS[0]] - landmarks[INNER_MOUTH_CORNERS[1]]))
-    return opening / (width + 1e-6)
-
-
-def mouth_box(landmarks, shape):
-    """Square box around the mouth; grows with the mouth when it opens."""
-    pts = landmarks[list(MOUTH_OUTLINE)]
-    x0, y0 = pts.min(axis=0)
-    x1, y1 = pts.max(axis=0)
-    side = max(x1 - x0, y1 - y0) * config.MOUTH_CROP_SCALE
-    return _square_box((x0 + x1) / 2, (y0 + y1) / 2, side, shape)
 
 
 def crop(img, box):
@@ -214,38 +143,36 @@ def augment(img, rng):
 
 
 # --------------------------------------------------------------- dataset ---
-def _grouped_split(y, g, seed, tries=3000):
-    """Whole groups (people) stay in one set. Tries many random groupings and
-    keeps the one whose IMAGE counts are closest to 70/15/15 and whose class
-    balance is closest to the full data. Both classes must be in every set.
-    Returns (i_train, i_val, i_test) index arrays, or None if none qualifies."""
+def _grouped_split(y, groups, seed, tries=3000):
+    """Keep groups together while balancing split sizes and class ratios."""
     rng = np.random.default_rng(seed)
     n = len(y)
-    groups = np.unique(g)
-    members = {k: np.flatnonzero(g == k) for k in groups}
-    train_f = 1 - config.VAL_FRACTION - config.TEST_FRACTION
-    targets = np.array([train_f, config.VAL_FRACTION, config.TEST_FRACTION])
-    cuts = (train_f * n, (train_f + config.VAL_FRACTION) * n)
-    pos_rate = float(y.mean())
+    unique_groups = np.unique(groups)
+    members = {group: np.flatnonzero(groups == group) for group in unique_groups}
+    train_fraction = 1 - config.VAL_FRACTION - config.TEST_FRACTION
+    targets = np.array([train_fraction, config.VAL_FRACTION, config.TEST_FRACTION])
+    cuts = (train_fraction * n, (train_fraction + config.VAL_FRACTION) * n)
+    positive_rate = float(y.mean())
 
-    best, best_score = None, 1e9
+    best, best_score = None, float("inf")
     for _ in range(tries):
-        sets = ([], [], [])
+        partitions = ([], [], [])
         count = 0
-        for k in rng.permutation(groups):
-            s = 0 if count < cuts[0] else (1 if count < cuts[1] else 2)
-            sets[s].append(members[k])
-            count += len(members[k])
-        if any(len(s) == 0 for s in sets):
+        for group in rng.permutation(unique_groups):
+            part = 0 if count < cuts[0] else (1 if count < cuts[1] else 2)
+            partitions[part].append(members[group])
+            count += len(members[group])
+        if any(not part for part in partitions):
             continue
-        idx = [np.concatenate(s) for s in sets]
-        if any(len(set(y[i].tolist())) < 2 for i in idx):
+        indices = [np.concatenate(part) for part in partitions]
+        if any(len(np.unique(y[index])) < 2 for index in indices):
             continue
-        fractions = np.array([len(i) / n for i in idx])
-        score = float(np.abs(fractions - targets).sum())               # size error
-        score += 0.5 * sum(abs(float(y[i].mean()) - pos_rate) for i in idx)  # class balance
+        fractions = np.array([len(index) / n for index in indices])
+        score = float(np.abs(fractions - targets).sum())
+        score += 0.5 * sum(abs(float(y[index].mean()) - positive_rate)
+                           for index in indices)
         if score < best_score:
-            best, best_score = idx, score
+            best, best_score = indices, score
     return tuple(best) if best is not None else None
 
 
@@ -255,10 +182,9 @@ def load_split(name):
 
     If the cache has a 'group' array (eye model: person id from the file name)
     with more than two distinct groups, whole groups are kept in one set so the
-    same person is not in both training and test; the grouping is chosen so the
-    image counts land as close to 70/15/15 as the group sizes allow. Otherwise
-    (or if no grouping works) it falls back to the exact stratified random split.
-    The real ratio is printed every time."""
+    same person is not in both training and test. The grouped split balances
+    image counts as closely as possible; otherwise it falls back to a stratified
+    random split."""
     from sklearn.model_selection import train_test_split
 
     data = np.load(config.CACHE_DIR / f"{name}.npz")
@@ -274,11 +200,10 @@ def load_split(name):
         return i_tr, i_val, i_te
 
     splits, mode = None, "random (stratified)"
-    if (config.EYE_SPLIT_BY_PERSON and "group" in data.files
-            and len(set(data["group"].tolist())) > 2):
-        found = _grouped_split(y, data["group"], config.SEED)
-        if found is not None:
-            splits, mode = found, "by group (person)"
+    if "group" in data.files and len(set(data["group"].tolist())) > 2:
+        grouped = _grouped_split(y, data["group"], config.SEED)
+        if grouped is not None:
+            splits, mode = grouped, "by group (person)"
     if splits is None:
         splits = stratified()
     i_tr, i_val, i_te = splits
@@ -287,9 +212,6 @@ def load_split(name):
           f"val {len(i_val) / n:.1%}, test {len(i_te) / n:.1%}")
 
     split = {"train": (X[i_tr], y[i_tr]), "val": (X[i_val], y[i_val]), "test": (X[i_te], y[i_te])}
-    if "mar" in data.files:                # mouth aspect ratio of each photo (mouth model)
-        split["mar"] = {"train": data["mar"][i_tr], "val": data["mar"][i_val],
-                        "test": data["mar"][i_te]}
     return split
 
 

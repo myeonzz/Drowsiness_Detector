@@ -1,6 +1,6 @@
-phase,start_s,end_s,expected_yawns,detected_yawns,false_yawns,missed_yawns,peak_mar,longest_yawn_run_s,frames_above_threshold,frames_vetoed_by_cnn
-talk,41.0,71.0,0,1,1,0,0.702,4.2,59,0
-neutral,71.0,101.0,0,0,0,0,0.764,1.8,30,0
-yawn 1,101.0,116.0,1,0,0,1,0.753,0.9,8,0
-yawn 2,116.0,131.0,1,1,0,0,0.692,6.3,82,0
-yawn 3,131.0,146.0,1,0,0,1,0.587,3.1,25,0
+phase,start_s,end_s,expected_yawns,detected_yawns,false_yawns,missed_yawns,peak_mouth_cnn,longest_yawn_run_s,frames_above_threshold
+talk,0.0,30.0,0,0,0,0,0.988,1.5,49
+neutral,30.0,60.0,0,1,1,0,0.91,4.1,80
+yawn 1,60.0,75.0,1,0,0,1,0.816,1.3,13
+yawn 2,75.0,90.0,1,0,0,1,,0.0,0
+yawn 3,90.0,105.0,1,0,0,1,,0.0,0

@@ -6,26 +6,17 @@ in one place.
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "train"
 
 # ----------------------------------------------------------------- paths ---
-DATA_DIR = Path(r"D:\Downloads\train")
 MODELS_DIR = ROOT / "models"
 RESULTS_DIR = ROOT / "results"
 EVENTS_DIR = ROOT / "events"
 SCENARIOS_DIR = ROOT / "scenarios"
 CACHE_DIR = ROOT / "cache"
 
-# MediaPipe Face Landmarker (the current replacement for "Face Mesh").
-# Now used ONLY by the mouth / yawn side (MAR + mouth crop).
-# train.py / demo.py download it automatically if it is missing.
-FACE_LANDMARKER_PATH = MODELS_DIR / "face_landmarker.task"
-FACE_LANDMARKER_URL = (
-    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
-    "face_landmarker/float16/1/face_landmarker.task"
-)
-
-# YuNet face + eye-centre detector (OpenCV). Used for the EYE pipeline instead
-# of MediaPipe. Downloaded automatically if missing.
+# YuNet face + eye-centre detector (OpenCV). Used for the eye and mouth pipeline
+# Used for both the eye and mouth CNN crops. Downloaded automatically if missing.
 YUNET_PATH = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
 YUNET_URL = (
     "https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -50,19 +41,18 @@ MODELS = {
 # Eye dataset options (train.py).
 EYE_DATA_FULLFACE = False          # False: images are eye close-ups (used as given)
                                    # True: full-face frames, cropped with YuNet
-EYE_GROUP_SEP = "_"
-EYE_SPLIT_BY_PERSON = False                # person id = file name up to the first separator;
+MOUTH_DATA_FULLFACE = False        # Images are mouth close-ups (used as given)
+EYE_GROUP_SEP = "_"                # person id = file name up to the first separator;
                                    # the eye split keeps each person in one set
 
 # Crop geometry (shared by training and the live demo).
-FACE_MARGIN = 0.10                 # extra border around the landmark box
-MOUTH_CROP_SCALE = 1.5             # square side = scale * mouth outline size
+MOUTH_CROP_WIDTH = 0.55             # square crop width relative to YuNet face width
+MOUTH_CROP_HEIGHT = 0.55            # square crop height relative to YuNet face height
+MOUTH_CROP_Y = 0.68                 # mouth centre as a fraction of face height
 # Eye crops now come from YuNet eye centres: square side = scale * eye-to-eye
 # distance. Tune by comparing saved live crops with the training images.
 EYE_CROP_SCALE_YUNET = 0.70
 EYE_CROP_SHIFT_UP = 0.12           # shift crop up (fraction of side) to include the brow
-# Legacy (MediaPipe eye corners); no longer used by the eye pipeline.
-EYE_CROP_SCALE = 1.7
 
 # -------------------------------------------------------------- training ---
 EPOCHS = 100
@@ -95,15 +85,15 @@ MODEL_VARIANT = "int8"             # "int8" or "float" TFLite model in the demo
 # -------------------------------------------------- per-frame decisions ---
 CLOSED_CONF_MIN = 0.70             # count "closed" only if P(Closed) >= this
 YAWN_CONF_MIN = 0.70               # count "yawn" only if P(yawn) >= this
-OPEN_FRAME_TOLERANCE = 1           # open frames allowed inside a closure
+# Eye P(closed) is smoothed with an exponential moving average before it is
+# compared with CLOSED_CONF_MIN: smoothed = a * new + (1 - a) * previous.
+# 1.0 = no smoothing; lower = smoother but slower to react.
+EYE_SMOOTH_ALPHA = 0.4
+OPEN_FRAME_TOLERANCE = 4           # open frames allowed inside a closure (was 1)
 YAWN_FRAME_TOLERANCE = 1           # non-yawn frames allowed inside a yawn
 
-# Startup calibration (C key repeats it): the driver keeps the mouth closed
-# while the closed-mouth MAR is measured. There is no eye calibration any more.
-CALIBRATION_S = 5.0
-
-# Eye closure. The eye CNN is the only eye signal: a frame is "closed" when
-# P(Closed) of both eyes is >= CLOSED_CONF_MIN. No MediaPipe / EAR.
+# Eye closure. A frame is "closed" when P(Closed) of both eyes is at least
+# CLOSED_CONF_MIN.
 EYE_CLOSED_RULE = "cnn"
 EYES_CLOSED_WARN_S = 2.0           # red "EYES CLOSED" banner on the camera view after this many seconds
 # True: the level card follows the eyes in real time (open eyes -> NORMAL at once;
@@ -112,34 +102,15 @@ EYES_CLOSED_WARN_S = 2.0           # red "EYES CLOSED" banner on the camera view
 #        the 10-minute window.
 LEVEL_REALTIME = False
 
-# ---- Legacy EAR settings: NOT used by the new eye pipeline. Kept only so ----
-# ---- older scripts (yawn_test.py, scenarios.py) that import them still run. --
-EAR_CLOSURE_MIN = 0.80
-DROOPY_CLOSURE_MIN = 0.25
-EAR_CLOSED_MANUAL = None
-EAR_OPEN_DEFAULT = 0.30
-EAR_OPEN_MIN = 0.12
-
-# Yawn detection. Primary signal: Mouth Aspect Ratio from the lip landmarks
-# (MAR = inner-lip opening / mouth width). A yawn frame = MAR at or above the
-# threshold. The threshold is set per driver by a short calibration at
-# startup (mouth closed, normal face): threshold = baseline + MAR_YAWN_OFFSET.
-MAR_THRESHOLD_MANUAL = None        # e.g. 0.40 to skip calibration and force a threshold
-MAR_YAWN_OFFSET = 0.35             # threshold = calibrated baseline + this
-MAR_THRESHOLD_MIN = 0.30           # the threshold never goes below this
-MAR_BASELINE_DEFAULT = 0.02        # used when calibration is rejected
-MAR_BASELINE_MAX = 0.20            # calibration is rejected if the mouth was open
-# Secondary check: the mouth-crop CNN must also say "yawn" before a frame counts.
-# If no trained mouth model is found, demo.py falls back to MAR only.
+# Yawn detection. The mouth-crop CNN is the only yawn signal.
 YAWN_USE_CNN = True
-YAWN_CNN_MIN = 0.50                # P(yawn) from the mouth CNN needed to agree
+YAWN_CNN_MIN = 0.50                # P(yawn) from the mouth CNN
 
 # Sunglasses / occlusion check: eyes are "not visible" when the eye region is
 # much darker than the rest of the face (median gray ratio below this).
 # 0.45 flagged dark sunglasses and no bare eyes on the dataset's car photos.
 EYE_DARK_RATIO = 0.45
 EYE_DARK_BOX_SCALE_YUNET = 0.375   # checked box side = scale * eye-to-eye distance
-EYE_DARK_BOX_SCALE = 0.9           # legacy (MediaPipe eye corners), unused
 EYES_UNKNOWN_AFTER_S = 3.0         # no visible eyes for this long -> "unknown"
 
 # ---------------------------------------------------------------- alerts ---

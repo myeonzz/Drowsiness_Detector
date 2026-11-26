@@ -1,10 +1,10 @@
 {
   "no_yawn": {
-    "total": 0,
+    "total": 2591,
     "dropped": 0
   },
   "yawn": {
     "total": 2528,
-    "dropped": 2442
+    "dropped": 0
   }
 }
