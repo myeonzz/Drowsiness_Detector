@@ -143,16 +143,49 @@ def augment(img, rng):
 
 
 # --------------------------------------------------------------- dataset ---
+def _grouped_split(y, groups, seed, tries=3000):
+    """Keep groups together while balancing split sizes and class ratios."""
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    unique_groups = np.unique(groups)
+    members = {group: np.flatnonzero(groups == group) for group in unique_groups}
+    train_fraction = 1 - config.VAL_FRACTION - config.TEST_FRACTION
+    targets = np.array([train_fraction, config.VAL_FRACTION, config.TEST_FRACTION])
+    cuts = (train_fraction * n, (train_fraction + config.VAL_FRACTION) * n)
+    positive_rate = float(y.mean())
+
+    best, best_score = None, float("inf")
+    for _ in range(tries):
+        partitions = ([], [], [])
+        count = 0
+        for group in rng.permutation(unique_groups):
+            part = 0 if count < cuts[0] else (1 if count < cuts[1] else 2)
+            partitions[part].append(members[group])
+            count += len(members[group])
+        if any(not part for part in partitions):
+            continue
+        indices = [np.concatenate(part) for part in partitions]
+        if any(len(np.unique(y[index])) < 2 for index in indices):
+            continue
+        fractions = np.array([len(index) / n for index in indices])
+        score = float(np.abs(fractions - targets).sum())
+        score += 0.5 * sum(abs(float(y[index].mean()) - positive_rate)
+                           for index in indices)
+        if score < best_score:
+            best, best_score = indices, score
+    return tuple(best) if best is not None else None
+
+
 def load_split(name):
     """Load cached 96x96 data for a model and return the fixed 70/15/15 split:
     dict with (X, y) tuples under 'train', 'val', 'test'.
 
     If the cache has a 'group' array (eye model: person id from the file name)
     with more than two distinct groups, whole groups are kept in one set so the
-    same person is not in both training and test. Otherwise (or if a grouped
-    split leaves a class out of val/test) it falls back to the stratified
+    same person is not in both training and test. The grouped split balances
+    image counts as closely as possible; otherwise it falls back to a stratified
     random split."""
-    from sklearn.model_selection import GroupShuffleSplit, train_test_split
+    from sklearn.model_selection import train_test_split
 
     data = np.load(config.CACHE_DIR / f"{name}.npz")
     X, y = data["X"], data["y"]
@@ -168,19 +201,15 @@ def load_split(name):
 
     splits, mode = None, "random (stratified)"
     if "group" in data.files and len(set(data["group"].tolist())) > 2:
-        g = data["group"]
-        i_tr, i_tmp = next(GroupShuffleSplit(1, test_size=hold, random_state=config.SEED)
-                           .split(idx, y, g))
-        j_val, j_te = next(GroupShuffleSplit(1, test_size=config.TEST_FRACTION / hold,
-                                             random_state=config.SEED)
-                           .split(i_tmp, y[i_tmp], g[i_tmp]))
-        i_val, i_te = i_tmp[j_val], i_tmp[j_te]
-        if len(set(y[i_val])) == 2 and len(set(y[i_te])) == 2:
-            splits, mode = (i_tr, i_val, i_te), "by group (person)"
+        grouped = _grouped_split(y, data["group"], config.SEED)
+        if grouped is not None:
+            splits, mode = grouped, "by group (person)"
     if splits is None:
         splits = stratified()
     i_tr, i_val, i_te = splits
-    print(f"[{name}] split: {mode}")
+    n = len(y)
+    print(f"[{name}] split: {mode} -> train {len(i_tr) / n:.1%}, "
+          f"val {len(i_val) / n:.1%}, test {len(i_te) / n:.1%}")
 
     split = {"train": (X[i_tr], y[i_tr]), "val": (X[i_val], y[i_val]), "test": (X[i_te], y[i_te])}
     return split
