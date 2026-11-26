@@ -1,11 +1,15 @@
 """Train the two binary models (eye: Open/Closed, mouth: no_yawn/yawn), save
 them as .keras and convert to float + INT8 TensorFlow Lite.
 
-    python train.py            # both models
-    python train.py eye        # only one
+    python train.py                  # both models
+    python train.py eye              # only the eye model
+    python train.py mouth --fresh    # rebuild mouth cache and train from scratch
+
+Eye and mouth models use YuNet crops from full-face photos when configured;
+eye close-ups and mouth close-ups can also be used directly.
 """
+import argparse
 import json
-import sys
 
 import cv2
 import numpy as np
@@ -20,15 +24,18 @@ from keras import layers
 
 # ------------------------------------------------------------------ data ---
 def build_cache(name):
-    """Read images, crop (mouth model: mouth only), resize to 96x96 gray,
-    cache as .npz. The mouth cache also keeps each photo's MAR."""
+    """Read images, crop, resize to 96x96 gray, cache as .npz.
+    Mouth: YuNet face crop or direct mouth close-up.
+    Eye: direct close-up or YuNet eye crops.
+    The eye cache keeps a person/group id from the file name."""
     out = config.CACHE_DIR / f"{name}.npz"
     if out.exists():
         return
     config.CACHE_DIR.mkdir(exist_ok=True)
     config.RESULTS_DIR.mkdir(exist_ok=True)
-    finder = common.FaceFinder(video=False) if name == "mouth" else None
-    X, y, mar, dropped = [], [], [], {}
+    mouth_finder = common.EyeFinder() if (name == "mouth" and config.MOUTH_DATA_FULLFACE) else None
+    eye_finder = common.EyeFinder() if (name == "eye" and config.EYE_DATA_FULLFACE) else None
+    X, y, groups, dropped = [], [], [], {}
     for label, folder in enumerate(config.MODELS[name]):
         files = sorted((config.DATA_DIR / folder).glob("*"))
         dropped[folder] = {"total": len(files), "dropped": 0}
@@ -37,22 +44,37 @@ def build_cache(name):
             if img is None:
                 dropped[folder]["dropped"] += 1
                 continue
-            if finder is not None:                     # same crop as the demo
-                lm = finder.find(img)
-                box = common.mouth_box(lm, img.shape) if lm is not None else None
+            group = f.stem.split(config.EYE_GROUP_SEP)[0]
+            if mouth_finder is not None:
+                found = mouth_finder.find(img)
+                box = common.mouth_box_yunet(found, img.shape) if found is not None else None
                 if box is None:
                     dropped[folder]["dropped"] += 1
                     continue
-                img = common.crop(img, box)
-                mar.append(common.mouth_aspect_ratio(lm))
-            X.append(common.preprocess(img))
-            y.append(label)
-    if finder is not None:
-        finder.close()
-    extra = {"mar": np.array(mar, np.float32)} if mar else {}
+                crops = [common.crop(img, box)]
+            elif eye_finder is not None:               # eye, full-face frame
+                found = eye_finder.find(img)
+                boxes = common.eye_boxes_yunet(found, img.shape) if found else []
+                crops = [common.crop(img, b) for b in boxes if b is not None]
+                if not crops:
+                    dropped[folder]["dropped"] += 1
+                    continue
+            else:                                      # eye close-up, used as given
+                crops = [img]
+            for c in crops:
+                X.append(common.preprocess(c))
+                y.append(label)
+                groups.append(group)
+    class_counts = np.bincount(y, minlength=len(config.MODELS[name]))
+    if not len(X) or np.any(class_counts == 0):
+        raise ValueError(f"{name} dataset must contain readable images for every class "
+                         f"{config.MODELS[name]}; found {class_counts.tolist()}")
+    extra = {}
+    if name == "eye":                                  # group ids only for the eye split
+        extra["group"] = np.array(groups)
     np.savez_compressed(out, X=np.array(X, np.uint8), y=np.array(y, np.int64), **extra)
     for folder, d in dropped.items():
-        why = "no face found" if name == "mouth" else "unreadable"
+        why = "no face found" if (mouth_finder or eye_finder) else "unreadable"
         print(f"[{name}] {folder}: {d['total'] - d['dropped']} kept, "
               f"{d['dropped']} dropped ({why}) of {d['total']}")
     (config.RESULTS_DIR / f"{name}_dropped.json").write_text(json.dumps(dropped, indent=2))
@@ -158,5 +180,15 @@ def train_one(name):
 
 
 if __name__ == "__main__":
-    for model_name in (sys.argv[1:] or list(config.MODELS)):
+    parser = argparse.ArgumentParser(description="Train the eye and/or mouth classifier.")
+    parser.add_argument("models", nargs="*", choices=tuple(config.MODELS),
+                        help="models to train (default: all)")
+    parser.add_argument("--fresh", action="store_true",
+                        help="rebuild selected model caches before training from scratch")
+    args = parser.parse_args()
+    model_names = args.models or list(config.MODELS)
+    for model_name in model_names:
+        cache_path = config.CACHE_DIR / f"{model_name}.npz"
+        if args.fresh and cache_path.exists():
+            cache_path.unlink()
         train_one(model_name)

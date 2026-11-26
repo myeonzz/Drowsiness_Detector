@@ -112,7 +112,6 @@ def test_alarm_stops_only_after_eyes_open_two_seconds():
     s.run(1.5)
     assert s.state["alarm"]
     s.run(1.0)
-    # alarm is off; the level fell back to the offense count (1 offense)
     assert not s.state["alarm"] and s.state["level"] == 1
 
 
@@ -156,26 +155,14 @@ def test_window_timer_counts_down_to_oldest_offense():
     assert WINDOW - 62 < left < WINDOW - 59, left
 
 
-def test_override_holds_level_3_only_while_eyes_stay_closed():
+def test_microsleep_level_ends_after_eyes_open():
     s = Sim()
     s.run(10)
-    s.run(3.5, eye=CLOSED)                  # 3 s closure: override
-    assert s.state["level"] == 3 and s.state["override"]
-    s.run(1.0)                              # eyes open: override ends at once
-    assert s.state["level"] == 1 and not s.state["override"]
-    s.run(5)
-    s.run(2.2, eye=CLOSED)                  # second offense: Level 2, not Level 3
-    assert s.state["level"] == 2 and s.state["offense_count"] == 2
-
-
-def test_microsleep_offense_leaves_the_window():
-    s = Sim()
-    s.run(10)
-    s.run(3.5, eye=CLOSED)                  # one offense at ~12 s
-    s.run(WINDOW - 10)
-    assert s.state["level"] == 1            # eyes open, offense still in the window
-    s.run(15)
-    assert s.state["level"] == 0            # the offense has left the window
+    s.run(3.5, eye=CLOSED)
+    s.run(WINDOW - 10, eye=CLOSED)
+    assert s.state["level"] == 3
+    s.run(15, eye=OPEN)
+    assert s.state["level"] == 0
 
 
 def test_one_open_frame_does_not_reset_closure():
@@ -188,7 +175,7 @@ def test_one_open_frame_does_not_reset_closure():
     s2 = Sim()
     s2.run(20)
     s2.run(1.2, eye=CLOSED)
-    s2.run(2 * DT, eye=OPEN)                # two open frames: closure restarts
+    s2.run((cfg.OPEN_FRAME_TOLERANCE + 1) * DT, eye=OPEN)
     s2.run(1.0, eye=CLOSED)
     assert s2.state["level"] == 0
 

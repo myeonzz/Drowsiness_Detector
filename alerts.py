@@ -78,7 +78,7 @@ class AlertEngine:
 
     def perclos(self):
         """PERCLOS: share of closed frames in the last 60 s (shown on screen
-        only). The demo feeds it the P80 flag: EAR closure of 80 % or more."""
+        only). The demo feeds it the CNN P(closed) closure flag."""
         if not self.eye_samples:
             return 0.0
         return sum(1 for _, c in self.eye_samples if c) / len(self.eye_samples)

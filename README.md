@@ -10,19 +10,19 @@ Two small CNNs (96x96 grayscale input) do the classification:
 | eye model | Open / Closed | square crop around each eye |
 | mouth model | no_yawn / yawn | square crop around the mouth |
 
-MediaPipe Face Landmarker finds the face, eyes and lips. The same crop code
-(`common.py`) is used for training and for live prediction.
+OpenCV YuNet detects the face in the live demo and locates face-relative eye
+and mouth regions. The mouth classifier is trained from the mouth-crop images
+in `train\no_yawn` and `train\yawn`.
 
-Yawns are detected from the lip landmarks first (Mouth Aspect Ratio); the
-mouth model is a second check. See "Yawn detection" below.
+Yawns are classified by the mouth CNN. See "Yawn detection" below.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `config.py` | Every path, model setting and alert threshold |
-| `common.py` | Face landmarks, crops, preprocessing, augmentation, split, TFLite runner |
-| `train.py` | Trains both models, saves `.keras`, float TFLite and INT8 TFLite |
+| `common.py` | YuNet detection and crops, preprocessing, augmentation, split, TFLite runner |
+| `train.py` | Trains selected models, saves `.keras`, float TFLite and INT8 TFLite |
 | `evaluate.py` | Test-set metrics and charts for float vs INT8 |
 | `alerts.py` | Offense-count alert logic, sounds, alert log, event clip recorder |
 | `demo.py` | Real-time demo (webcam or video file) |
@@ -48,8 +48,10 @@ execution policy).
 ## Run
 
 ```powershell
-# 1. Train both models (about 15 minutes on CPU). Add "eye" or "mouth" to train one.
+# 1. Train both models. Add "eye" or "mouth" to train one.
 .\.venv\Scripts\python.exe train.py
+# Retrain the mouth CNN from scratch using only train\no_yawn and train\yawn:
+.\.venv\Scripts\python.exe train.py mouth --fresh
 
 # 2. Evaluate -> charts and summary.csv in .\results
 .\.venv\Scripts\python.exe evaluate.py
@@ -73,8 +75,10 @@ execution policy).
 .\.venv\Scripts\python.exe yawn_test.py --part yawn
 ```
 
-To retrain from scratch after changing crop settings, delete the `cache`
-folder first.
+`--fresh` rebuilds the selected model's cached crops before training. The
+mouth model reads only `train\no_yawn` and `train\yawn`; it starts with new
+weights on each training run. YuNet is used by the live demo to find the face
+and derive its mouth crop, not to detect faces in these mouth-close-up images.
 
 ## Demo keys
 
@@ -82,15 +86,14 @@ folder first.
 |---|---|
 | `W` | 160-degree mode on/off ("160° MODE" is shown when on) |
 | `M` | Mute on/off ("MUTED" is shown when on) |
-| `C` | Recalibrate (5 s, eyes open and mouth closed) |
 | `Q` or `Esc` | Quit |
 
 `--wide` and `--mute` start the demo with those modes already on.
 
 ## Demo window
 
-- **Camera view (left):** only the tracked boxes, each with a name tag: `face` (magenta), each eye as `open 12%` (green) or `closed 86%` (red), and the mouth as `mouth 0.02` (green) or `yawn 0.71` (red). The number is that eye's closure % for eyes and the MAR for the mouth. Calibration and test prompts also appear here, and the border flashes red during the alarm.
-- **Details panel (right):** the alert level card with its message, then Driver (eyes, live closure % with EAR, eye CNN score, mouth, MAR against its threshold, PERCLOS P80), Offenses (count, kind of each, last one, time to the next drop), System (fps, 160-degree mode, sound) and the keys.
+- **Camera view (left):** the tracked face, eye and mouth boxes. Eye labels show the CNN's open/closed result and confidence; the mouth label shows the CNN's yawn probability. The border flashes red during the alarm.
+- **Details panel (right):** the alert level, eye and mouth CNN results, PERCLOS P80, offense count and history, time until the next offense expires, FPS, 160-degree mode and sound state.
 
 ## Camera settings
 
@@ -110,49 +113,30 @@ Video files go through the same resize, so scenario results match the live demo.
 
 ## Eye closure detection
 
-Two signals decide whether a frame counts as "eyes closed":
+YuNet locates the eye regions, then the eye CNN decides whether they are open
+or closed:
 
 | Signal | How it works |
 |---|---|
-| Eye CNN | Each eye crop is classified; both eyes must be Closed with confidence >= 0.7 |
-| EAR | Eye Aspect Ratio per eye = vertical lid distances / horizontal eye width, from the eye landmarks; both eyes are averaged |
-| Calibration | During the 5 s startup calibration (eyes open, mouth closed) the driver's median EAR is stored as `EAR_open`. If it is below 0.12 (eyes closed or hidden), a default of 0.30 is used |
-| Closure % | `1 - EAR / EAR_open`. 0% is the driver's normal open eye, whatever its shape. A frame is "80% closed" when closure >= 0.80 |
-| Manual EAR | `EAR_CLOSED_MANUAL` in `config.py` (for example `0.08`) replaces the 80% rule with a fixed EAR value |
-| Rule | `EYE_CLOSED_RULE` picks how the two combine: `"cnn"`, `"ear"`, `"either"` (default: CNN or EAR) or `"both"` (CNN and EAR) |
-| PERCLOS (P80) | Share of frames in the last 60 s with closure >= 0.80. Shown on screen; it does not trigger alerts |
+| Eye CNN | Each eye crop is classified; both eyes must have `P(Closed) >= CLOSED_CONF_MIN` (0.70 by default) |
+| Smoothing | An exponential moving average (`EYE_SMOOTH_ALPHA` in `config.py`) reduces frame-to-frame score changes |
+| PERCLOS (P80) | Share of frames in the last 60 s classified as closed. Shown on screen; it does not trigger alerts |
 
-The offense rules are unchanged: closed frames for 2 s is an offense, 3 s is
-the Level 3 override. Every frame's EAR, closure %, CNN score and decisions
-are logged to `events\frames_<start time>.csv`.
-
-Which rule suits a driver is what the eye check in `yawn_test.py` measures: it
-reports, for 20 s eyes open, 10 s droopy and 5 s closed, the share of frames
-each of the four rules calls closed. With `"either"`, a CNN that wrongly says
-Closed still counts as closed; if the eye check shows that for your eyes,
-switch to `"ear"` or `"both"`.
+The offense rules are unchanged: closed frames for 2 s is an offense, and 3 s
+is the Level 3 override. Per-frame eye CNN scores, decisions and PERCLOS are
+logged to `events\frames_<start time>.csv`.
 
 ## Yawn detection
 
 | Step | What happens |
 |---|---|
-| MAR | Mouth Aspect Ratio = vertical inner-lip opening / mouth width, from the lip landmarks. About 0.01 with the mouth closed; the dataset's yawn photos have a median of 0.71 |
-| Calibration | For the first 5 s the demo shows "CALIBRATING" (eyes open, mouth closed) and takes the median MAR as the driver's baseline. Press `C` to redo it |
-| Threshold | baseline + `MAR_YAWN_OFFSET` (0.35), never below 0.30. If the mouth was open during calibration (baseline above 0.20) a default baseline of 0.02 is used instead |
-| Manual threshold | Set `MAR_THRESHOLD_MANUAL` in `config.py` (for example `0.40`) to use a fixed threshold |
-| Mouth CNN | When MAR is above the threshold, the mouth-crop CNN must also say "yawn" (`YAWN_USE_CNN = True`). Set it to `False` to use MAR alone |
+| Face and mouth region | YuNet detects the face; `common.py` derives a mouth crop from the face box |
+| Mouth CNN | Classifies the 96x96 grayscale crop as `no_yawn` or `yawn` |
+| Threshold | A yawn frame is counted when P(yawn) reaches `YAWN_CNN_MIN` in `config.py` |
 | Yawn offense | Yawn frames continuously for 4 s (one other frame in between is allowed) |
 
-The details panel shows the live value as `MAR 0.12 (yawn >= 0.36)`,
-plus the CNN score while the mouth is open. No yawns are counted during
-calibration. Every frame's MAR is logged to `events\frames_<start time>.csv`.
-
-On the dataset's mouth test photos (`results\yawn_methods.csv`), MAR alone and
-"MAR and CNN agree" give the same result: no false yawns and 7 of 107 yawn
-photos missed, all with the mouth only partly open (MAR 0.21-0.36). So the CNN neither helps nor
-hurts there. On the live webcam, run `yawn_test.py`: its
-`frames_vetoed_by_cnn` column shows whether the CNN is blocking real yawns.
-If it is, turn it off.
+The details panel shows the CNN's P(yawn) and the configured threshold. The
+per-frame log records the mouth CNN score and yawn decision.
 
 ## Outputs
 
@@ -164,15 +148,15 @@ If it is, turn it off.
 | `results\<model>_confusion_matrix.png` | Confusion matrices (float and INT8) |
 | `results\<model>_roc.png` | ROC curves |
 | `results\<model>_training_curves.png` | Training / validation accuracy and loss |
-| `results\mouth_dropped.json` | yawn / no_yawn images dropped because no face was found |
-| `results\yawn_methods.csv` | Yawn decision per test photo: MAR alone, mouth CNN alone, both agreeing |
+| `results\mouth_dropped.json` | Per-class image counts dropped while building the mouth cache |
+| `results\yawn_methods.csv` | Held-out test metrics for the mouth CNN |
 | `results\eye_test.csv`, `eye_test_closure.png` | Guided eye check: % of frames each rule calls closed in the open, droopy and closed parts; closure plot |
-| `results\yawn_test.csv`, `yawn_test_mar.png` | Guided yawn check: false / missed yawns per phase; MAR plot |
+| `results\yawn_test.csv`, `yawn_test_mouth_cnn.png` | Guided yawn check: mouth CNN scores by test phase |
 | `results\guided_test_frames.csv` | Every frame's signals from the guided test |
 | `results\scenarios.csv` | Expected vs highest level per scenario video |
 | `events\*.avi` + `*.json` | 10 s clip (5 s before + 5 s after) and log for each event that results in Level 2 or 3 |
 | `events\alerts_<start time>.json` | One log per demo session listing every offense and override: time, level, trigger, reason and offense count |
-| `events\frames_<start time>.csv` | One log per demo session with every frame's EAR, closure %, eye CNN score, PERCLOS, MAR, mouth CNN score and the decisions |
+| `events\frames_<start time>.csv` | One log per demo session with eye and mouth CNN scores, decisions and PERCLOS |
 
 ## Alert levels (offense count)
 
@@ -240,9 +224,8 @@ processed on the video's own clock, so results do not depend on laptop speed.
 ## Changes from the Kaggle reference notebook
 
 - Two binary models instead of one 4-class model.
-- MediaPipe Face Landmarker replaces the Haar cascade. The installed OpenCV 5
-  wheel no longer ships the Haar XML files, and using one detector for both
-  training crops and live crops keeps them consistent.
+- OpenCV YuNet locates faces and eyes in live frames; CNNs classify eye
+  closure and yawning.
 - 96x96 grayscale input instead of 145x145 RGB.
 - Current Keras API (`argmax` on the softmax output, no `predict_classes`).
 - The yawn model sees a mouth crop instead of the whole face, with the same
